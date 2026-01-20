@@ -70,7 +70,7 @@ def quantize(audio, bits):
     return audio * 2.0 - 1.0
 
 
-def add_hum(audio, fs, hum_freq=50.0, harmonics=3, level_db=-45.0):
+def add_hum(audio, fs, hum_freq=50.0, harmonics=3, level_db=-45.0, level_mode="relative"):
     if level_db is None:
         return audio
     duration = len(audio) / fs
@@ -79,9 +79,12 @@ def add_hum(audio, fs, hum_freq=50.0, harmonics=3, level_db=-45.0):
     for i in range(1, harmonics + 1):
         hum += np.sin(2.0 * np.pi * hum_freq * i * t)
     hum /= max(harmonics, 1)
-    rms_audio = np.sqrt(np.mean(audio ** 2) + EPS)
     rms_target = 10 ** (level_db / 20.0)
-    hum *= rms_target / max(rms_audio, EPS)
+    if level_mode == "absolute":
+        hum *= rms_target
+    else:
+        rms_audio = np.sqrt(np.mean(audio ** 2) + EPS)
+        hum *= rms_target / max(rms_audio, EPS)
     return audio + hum
 
 
@@ -111,13 +114,15 @@ def _ffmpeg_codec_roundtrip(audio, fs, codec):
         if codec == "amr_nb":
             codec_name = "amr_nb"
             bitrate = "12.2k"
+            codec_sr = 8000
         elif codec == "amr_wb":
             codec_name = "amr_wb"
             bitrate = "12.65k"
+            codec_sr = 16000
         else:
             return None
         amr_path = os.path.join(tmpdir, "tmp.amr")
-        cmd_enc = [ffmpeg, "-y", "-i", in_wav, "-ar", str(fs), "-ac", "1",
+        cmd_enc = [ffmpeg, "-y", "-i", in_wav, "-ar", str(codec_sr), "-ac", "1",
                    "-c:a", codec_name, "-b:a", bitrate, amr_path]
         cmd_dec = [ffmpeg, "-y", "-i", amr_path, "-ar", str(fs), "-ac", "1", out_wav]
         try:
@@ -224,6 +229,7 @@ def apply_telephony_augmentation(audio, fs, cfg, rng=None):
             hum_freq=cfg.get("hum_freq", 50.0),
             harmonics=int(cfg.get("hum_harmonics", 3)),
             level_db=cfg.get("hum_level_db", -45.0),
+            level_mode=cfg.get("hum_level_mode", "relative"),
         )
 
     gain_var_db = float(cfg.get("gain_variation_db", 0.0))

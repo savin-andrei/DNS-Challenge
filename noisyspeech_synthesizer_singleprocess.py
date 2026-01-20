@@ -17,7 +17,7 @@ import random
 import librosa
 import numpy as np
 from scipy import signal
-from audiolib import audioread, audiowrite, segmental_snr_mixer, activitydetector, is_clipped, add_clipping
+from audiolib import audioread, audiowrite, segmental_snr_mixer, activitydetector, is_clipped, add_clipping, normalize
 import utils
 import telephony_augment
 
@@ -241,15 +241,43 @@ def main_gen(params):
         else:
             snr = np.random.randint(params['snr_lower'], params['snr_upper'])
 
-        clean_snr, noise_snr, noisy_snr, target_level = segmental_snr_mixer(params=params, 
-                                                                  clean=clean, 
-                                                                  noise=noise, 
+        clean_snr, noise_snr, noisy_snr, target_level = segmental_snr_mixer(params=params,
+                                                                  clean=clean,
+                                                                  noise=noise,
                                                                   snr=snr)
         # Uncomment the below lines if you need segmental SNR and comment the above lines using snr_mixer
         #clean_snr, noise_snr, noisy_snr, target_level = segmental_snr_mixer(params=params, 
         #                                                         clean=clean, 
         #                                                          noise=noise, 
         #                                                         snr=snr)
+
+        post_mix_applied = False
+        if params.get('telephony') and params['telephony'].get('enable'):
+            if params['telephony'].get('apply_post_mix_clean', False):
+                clean_snr = telephony_augment.apply_telephony_augmentation(
+                    clean_snr, params['fs'], params['telephony'], rng=random
+                )
+                post_mix_applied = True
+            if params['telephony'].get('apply_post_mix_noise', False):
+                noise_snr = telephony_augment.apply_telephony_augmentation(
+                    noise_snr, params['fs'], params['telephony'], rng=random
+                )
+                post_mix_applied = True
+            if params['telephony'].get('apply_post_mix_noisy', False):
+                noisy_snr = telephony_augment.apply_telephony_augmentation(
+                    noisy_snr, params['fs'], params['telephony'], rng=random
+                )
+                post_mix_applied = True
+        if post_mix_applied:
+            clean_snr = normalize(clean_snr, target_level=target_level)
+            noise_snr = normalize(noise_snr, target_level=target_level)
+            noisy_snr = normalize(noisy_snr, target_level=target_level)
+            max_amp = max(abs(noisy_snr))
+            if max_amp >= 0.99:
+                scale = max_amp / 0.99
+                clean_snr = clean_snr / scale
+                noise_snr = noise_snr / scale
+                noisy_snr = noisy_snr / scale
         # unexpected clipping
         if is_clipped(clean_snr) or is_clipped(noise_snr) or is_clipped(noisy_snr):
             print("Warning: File #" + str(file_num) + " has unexpected clipping, " + \
@@ -404,6 +432,9 @@ def main_body():
         'enable': _cfg_bool('telephony_enable', False),
         'apply_to_clean': _cfg_bool('telephony_apply_to_clean', True),
         'apply_to_noise': _cfg_bool('telephony_apply_to_noise', True),
+        'apply_post_mix_clean': _cfg_bool('telephony_apply_post_mix_clean', False),
+        'apply_post_mix_noise': _cfg_bool('telephony_apply_post_mix_noise', False),
+        'apply_post_mix_noisy': _cfg_bool('telephony_apply_post_mix_noisy', False),
         'codec_backend': cfg.get('telephony_codec_backend', 'internal'),
         'codec_mix': telephony_augment.parse_codec_mix(
             cfg.get('telephony_codec_mix', 'amr_nb:0.75,amr_wb:0.2,alaw:0.05')
@@ -420,6 +451,7 @@ def main_body():
         'hum_freq': _cfg_float('telephony_hum_freq', 50.0),
         'hum_harmonics': _cfg_int('telephony_hum_harmonics', 3),
         'hum_level_db': _cfg_float('telephony_hum_level_db', -45.0),
+        'hum_level_mode': cfg.get('telephony_hum_level_mode', 'relative'),
         'gain_variation_db': _cfg_float('telephony_gain_variation_db', 0.0),
         'gain_variation_segment_s': _cfg_float('telephony_gain_variation_segment_s', 1.0),
     }
