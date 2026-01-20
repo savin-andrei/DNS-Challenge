@@ -91,8 +91,8 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
 
         idx = (idx + 1) % np.size(source_files)
         input_audio, fs_input = audioread(source_files[idx])
-        if input_audio is None:
-            sys.stderr.write("WARNING: Cannot read file: %s\n" % source_files[idx])
+        if input_audio is None or len(input_audio) == 0:
+            sys.stderr.write("WARNING: Empty or unreadable audio: %s\n" % source_files[idx])
             continue
         if fs_input != fs_output:
             input_audio = librosa.resample(input_audio, fs_input, fs_output)
