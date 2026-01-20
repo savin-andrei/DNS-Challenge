@@ -184,7 +184,11 @@ def main_gen(params):
         # add reverb with selected RIR
         rir_index = random.randint(0,len(params['myrir'])-1)
         
-        my_rir = os.path.normpath(os.path.join('datasets', 'impulse_responses', params['myrir'][rir_index]))
+        rir_rel = params['myrir'][rir_index]
+        if os.path.isabs(rir_rel):
+            my_rir = os.path.normpath(rir_rel)
+        else:
+            my_rir = os.path.normpath(os.path.join(params['rir_base_dir'], rir_rel))
         (fs_rir,samples_rir) = wavfile.read(my_rir)
 
         my_channel = int(params['mychannel'][rir_index])
@@ -343,6 +347,8 @@ def main_body():
     params['upper_t60'] = float(cfg['upper_t60'])
     params['rir_table_csv'] = str(cfg['rir_table_csv'])
     params['clean_speech_t60_csv'] = str(cfg['clean_speech_t60_csv'])
+    params['rir_base_dir'] = cfg.get('rir_base_dir',
+                                     os.path.join('datasets', 'impulse_responses'))
 
     if cfg['fileindex_start'] != 'None' and cfg['fileindex_end'] != 'None':
         params['num_files'] = int(cfg['fileindex_end'])-int(cfg['fileindex_start'])
