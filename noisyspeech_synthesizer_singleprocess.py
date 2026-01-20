@@ -181,33 +181,33 @@ def main_gen(params):
         clean, clean_sf, clean_cf, clean_laf, clean_index = \
             gen_audio(True, params, clean_index)
 
-        # add reverb with selected RIR
-        rir_index = random.randint(0,len(params['myrir'])-1)
-        
-        rir_rel = params['myrir'][rir_index]
-        if os.path.isabs(rir_rel):
-            my_rir = os.path.normpath(rir_rel)
-        else:
-            prefix = os.path.normpath(os.path.join('datasets', 'impulse_responses'))
-            norm_rir = os.path.normpath(rir_rel)
-            if norm_rir.startswith(prefix + os.sep) or norm_rir == prefix:
-                norm_rir = norm_rir[len(prefix):].lstrip(os.sep)
-            my_rir = os.path.normpath(os.path.join(params['rir_base_dir'], norm_rir))
-        (fs_rir,samples_rir) = wavfile.read(my_rir)
+        if params.get('use_rir', True) and params.get('myrir'):
+            # add reverb with selected RIR
+            rir_index = random.randint(0, len(params['myrir']) - 1)
 
-        my_channel = int(params['mychannel'][rir_index])
-        
-        if samples_rir.ndim==1:
-            samples_rir_ch = np.array(samples_rir)
-            
-        elif my_channel > 1:
-            samples_rir_ch = samples_rir[:, my_channel -1]
-        else:
-            samples_rir_ch = samples_rir[:, my_channel -1]
-            #print(samples_rir.shape)
-            #print(my_channel)
+            rir_rel = params['myrir'][rir_index]
+            if os.path.isabs(rir_rel):
+                my_rir = os.path.normpath(rir_rel)
+            else:
+                prefix = os.path.normpath(os.path.join('datasets', 'impulse_responses'))
+                norm_rir = os.path.normpath(rir_rel)
+                if norm_rir.startswith(prefix + os.sep) or norm_rir == prefix:
+                    norm_rir = norm_rir[len(prefix):].lstrip(os.sep)
+                my_rir = os.path.normpath(os.path.join(params['rir_base_dir'], norm_rir))
+            (fs_rir, samples_rir) = wavfile.read(my_rir)
 
-        clean = add_pyreverb(clean, samples_rir_ch)
+            my_channel = int(params['mychannel'][rir_index])
+
+            if samples_rir.ndim == 1:
+                samples_rir_ch = np.array(samples_rir)
+            elif my_channel > 1:
+                samples_rir_ch = samples_rir[:, my_channel - 1]
+            else:
+                samples_rir_ch = samples_rir[:, my_channel - 1]
+                #print(samples_rir.shape)
+                #print(my_channel)
+
+            clean = add_pyreverb(clean, samples_rir_ch)
         clean_target_len = len(clean)
         if params.get('telephony') and params['telephony'].get('enable') \
            and params['telephony'].get('apply_to_clean', True):
