@@ -188,7 +188,11 @@ def main_gen(params):
         if os.path.isabs(rir_rel):
             my_rir = os.path.normpath(rir_rel)
         else:
-            my_rir = os.path.normpath(os.path.join(params['rir_base_dir'], rir_rel))
+            prefix = os.path.normpath(os.path.join('datasets', 'impulse_responses'))
+            norm_rir = os.path.normpath(rir_rel)
+            if norm_rir.startswith(prefix + os.sep) or norm_rir == prefix:
+                norm_rir = norm_rir[len(prefix):].lstrip(os.sep)
+            my_rir = os.path.normpath(os.path.join(params['rir_base_dir'], norm_rir))
         (fs_rir,samples_rir) = wavfile.read(my_rir)
 
         my_channel = int(params['mychannel'][rir_index])
