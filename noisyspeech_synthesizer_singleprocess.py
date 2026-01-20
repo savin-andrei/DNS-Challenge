@@ -346,6 +346,7 @@ def main_body():
     params['clean_mandarin'] = str(cfg['clean_mandarin'])
     
     # rir
+    params['use_rir'] = utils.str2bool(cfg.get('use_rir', 'True'))
     params['rir_choice'] = int(cfg['rir_choice'])
     params['lower_t60'] = float(cfg['lower_t60'])
     params['upper_t60'] = float(cfg['upper_t60'])
@@ -504,80 +505,84 @@ def main_body():
         shuffle(noisedirs)
         params['noisedirs'] = noisedirs
 
-    # rir 
-    temp = pd.read_csv(params['rir_table_csv'], skiprows=[1], sep=',', header=None,  names=['wavfile','channel','T60_WB','C50_WB','isRealRIR'])
-    temp.keys()
-    #temp.wavfile
+    if params['use_rir']:
+        temp = pd.read_csv(params['rir_table_csv'], skiprows=[1], sep=',', header=None,
+                           names=['wavfile','channel','T60_WB','C50_WB','isRealRIR'])
+        temp.keys()
 
-    rir_wav = temp['wavfile'][1:] # 115413
-    rir_channel = temp['channel'][1:] 
-    rir_t60 = temp['T60_WB'][1:] 
-    rir_isreal= temp['isRealRIR'][1:]  
+        rir_wav = temp['wavfile'][1:] # 115413
+        rir_channel = temp['channel'][1:]
+        rir_t60 = temp['T60_WB'][1:]
+        rir_isreal= temp['isRealRIR'][1:]
 
-    rir_wav2 = [w.replace('\\', '/') for w in rir_wav]
-    rir_channel2 = [w for w in rir_channel]
-    rir_t60_2 = [w for w in rir_t60]
-    rir_isreal2= [w for w in rir_isreal]
-    
-    myrir =[]
-    mychannel=[]
-    myt60=[]
+        rir_wav2 = [w.replace('\\', '/') for w in rir_wav]
+        rir_channel2 = [w for w in rir_channel]
+        rir_t60_2 = [w for w in rir_t60]
+        rir_isreal2= [w for w in rir_isreal]
 
-    lower_t60=  params['lower_t60']
-    upper_t60=  params['upper_t60']
+        myrir =[]
+        mychannel=[]
+        myt60=[]
 
-    if params['rir_choice']==1: # real 3076 IRs
-        real_indices= [i for i, x in enumerate(rir_isreal2) if x == "1"]
+        lower_t60=  params['lower_t60']
+        upper_t60=  params['upper_t60']
 
-        chosen_i = []
-        for i in real_indices:
-            if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
-                chosen_i.append(i)
+        if params['rir_choice']==1: # real 3076 IRs
+            real_indices= [i for i, x in enumerate(rir_isreal2) if x == "1"]
 
-        myrir= [rir_wav2[i] for i in chosen_i]
-        mychannel = [rir_channel2[i] for i in chosen_i]
-        myt60 = [rir_t60_2[i] for i in chosen_i]
+            chosen_i = []
+            for i in real_indices:
+                if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
+                    chosen_i.append(i)
+
+            myrir= [rir_wav2[i] for i in chosen_i]
+            mychannel = [rir_channel2[i] for i in chosen_i]
+            myt60 = [rir_t60_2[i] for i in chosen_i]
 
 
-    elif params['rir_choice']==2: # synthetic 112337 IRs
-        synthetic_indices= [i for i, x in enumerate(rir_isreal2) if x == "0"]
+        elif params['rir_choice']==2: # synthetic 112337 IRs
+            synthetic_indices= [i for i, x in enumerate(rir_isreal2) if x == "0"]
 
-        chosen_i = []
-        for i in synthetic_indices:
-            if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
-                chosen_i.append(i)
+            chosen_i = []
+            for i in synthetic_indices:
+                if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
+                    chosen_i.append(i)
 
-        myrir= [rir_wav2[i] for i in chosen_i]
-        mychannel = [rir_channel2[i] for i in chosen_i]
-        myt60 = [rir_t60_2[i] for i in chosen_i]
+            myrir= [rir_wav2[i] for i in chosen_i]
+            mychannel = [rir_channel2[i] for i in chosen_i]
+            myt60 = [rir_t60_2[i] for i in chosen_i]
 
-    elif params['rir_choice']==3: # both real and synthetic
-        all_indices= [i for i, x in enumerate(rir_isreal2)]
+        elif params['rir_choice']==3: # both real and synthetic
+            all_indices= [i for i, x in enumerate(rir_isreal2)]
 
-        chosen_i = []
-        for i in all_indices:
-            if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
-                chosen_i.append(i)
+            chosen_i = []
+            for i in all_indices:
+                if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
+                    chosen_i.append(i)
 
-        myrir= [rir_wav2[i] for i in chosen_i]
-        mychannel = [rir_channel2[i] for i in chosen_i]
-        myt60 = [rir_t60_2[i] for i in chosen_i]
+            myrir= [rir_wav2[i] for i in chosen_i]
+            mychannel = [rir_channel2[i] for i in chosen_i]
+            myt60 = [rir_t60_2[i] for i in chosen_i]
 
-    else:  # default both real and synthetic
-        all_indices= [i for i, x in enumerate(rir_isreal2)]
+        else:  # default both real and synthetic
+            all_indices= [i for i, x in enumerate(rir_isreal2)]
 
-        chosen_i = []
-        for i in all_indices:
-            if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
-                chosen_i.append(i)
+            chosen_i = []
+            for i in all_indices:
+                if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
+                    chosen_i.append(i)
 
-        myrir= [rir_wav2[i] for i in chosen_i]
-        mychannel = [rir_channel2[i] for i in chosen_i]
-        myt60 = [rir_t60_2[i] for i in chosen_i]
+            myrir= [rir_wav2[i] for i in chosen_i]
+            mychannel = [rir_channel2[i] for i in chosen_i]
+            myt60 = [rir_t60_2[i] for i in chosen_i]
 
-    params['myrir'] = myrir
-    params['mychannel'] = mychannel
-    params['myt60'] = myt60
+        params['myrir'] = myrir
+        params['mychannel'] = mychannel
+        params['myt60'] = myt60
+    else:
+        params['myrir'] = []
+        params['mychannel'] = []
+        params['myt60'] = []
 
     # Call main_gen() to generate audio
     clean_source_files, clean_clipped_files, clean_low_activity_files, \
