@@ -19,6 +19,7 @@ import numpy as np
 from scipy import signal
 from audiolib import audioread, audiowrite, segmental_snr_mixer, activitydetector, is_clipped, add_clipping
 import utils
+import telephony_augment
 
 import pandas as pd
 from pathlib import Path
@@ -38,6 +39,15 @@ def add_pyreverb(clean_speech, rir):
     reverb_speech = reverb_speech[0 : clean_speech.shape[0]]
 
     return reverb_speech
+
+
+def _match_length(audio, target_len):
+    if len(audio) > target_len:
+        return audio[:target_len]
+    if len(audio) < target_len:
+        pad = np.zeros(target_len - len(audio))
+        return np.append(audio, pad)
+    return audio
 
 def build_audio(is_clean, params, index, audio_samples_length=-1):
     '''Construct an audio signal from source files'''
@@ -190,10 +200,23 @@ def main_gen(params):
             #print(my_channel)
 
         clean = add_pyreverb(clean, samples_rir_ch)
+        clean_target_len = len(clean)
+        if params.get('telephony') and params['telephony'].get('enable') \
+           and params['telephony'].get('apply_to_clean', True):
+            clean = telephony_augment.apply_telephony_augmentation(
+                clean, params['fs'], params['telephony'], rng=random
+            )
+            clean = _match_length(clean, clean_target_len)
 
         # generate noise
         noise, noise_sf, noise_cf, noise_laf, noise_index = \
-            gen_audio(False, params, noise_index, len(clean))
+            gen_audio(False, params, noise_index, clean_target_len)
+        if params.get('telephony') and params['telephony'].get('enable') \
+           and params['telephony'].get('apply_to_noise', True):
+            noise = telephony_augment.apply_telephony_augmentation(
+                noise, params['fs'], params['telephony'], rng=random
+            )
+            noise = _match_length(noise, clean_target_len)
 
         clean_clipped_files += clean_cf
         clean_low_activity_files += clean_laf
@@ -350,6 +373,45 @@ def main_body():
     params['noisyspeech_dir'] = utils.get_dir(cfg, 'noisy_destination', 'noisy')
     params['clean_proc_dir'] = utils.get_dir(cfg, 'clean_destination', 'clean')
     params['noise_proc_dir'] = utils.get_dir(cfg, 'noise_destination', 'noise')
+
+    def _cfg_bool(key, default=False):
+        if key not in cfg:
+            return default
+        return utils.str2bool(cfg[key])
+
+    def _cfg_float(key, default):
+        if key not in cfg:
+            return default
+        return float(cfg[key])
+
+    def _cfg_int(key, default):
+        if key not in cfg:
+            return default
+        return int(cfg[key])
+
+    params['telephony'] = {
+        'enable': _cfg_bool('telephony_enable', False),
+        'apply_to_clean': _cfg_bool('telephony_apply_to_clean', True),
+        'apply_to_noise': _cfg_bool('telephony_apply_to_noise', True),
+        'codec_backend': cfg.get('telephony_codec_backend', 'internal'),
+        'codec_mix': telephony_augment.parse_codec_mix(
+            cfg.get('telephony_codec_mix', 'amr_nb:0.75,amr_wb:0.2,alaw:0.05')
+        ),
+        'band_low_nb': _cfg_float('telephony_band_low_nb', 300.0),
+        'band_high_nb': _cfg_float('telephony_band_high_nb', 3400.0),
+        'band_low_wb': _cfg_float('telephony_band_low_wb', 50.0),
+        'band_high_wb': _cfg_float('telephony_band_high_wb', 7000.0),
+        'nb_target_sr': _cfg_int('telephony_nb_target_sr', 8000),
+        'wb_target_sr': _cfg_int('telephony_wb_target_sr', params['fs']),
+        'quant_bits_nb': _cfg_int('telephony_quant_bits_nb', 8),
+        'quant_bits_wb': _cfg_int('telephony_quant_bits_wb', 10),
+        'use_hum': _cfg_bool('telephony_use_hum', False),
+        'hum_freq': _cfg_float('telephony_hum_freq', 50.0),
+        'hum_harmonics': _cfg_int('telephony_hum_harmonics', 3),
+        'hum_level_db': _cfg_float('telephony_hum_level_db', -45.0),
+        'gain_variation_db': _cfg_float('telephony_gain_variation_db', 0.0),
+        'gain_variation_segment_s': _cfg_float('telephony_gain_variation_segment_s', 1.0),
+    }
 
     if 'speech_csv' in cfg.keys() and cfg['speech_csv'] != 'None':
         cleanfilenames = pd.read_csv(cfg['speech_csv'])
