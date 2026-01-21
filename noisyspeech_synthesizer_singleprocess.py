@@ -13,6 +13,7 @@ import ast
 import configparser as CP
 from random import shuffle
 import random
+import csv
 
 import librosa
 import numpy as np
@@ -204,6 +205,8 @@ def main_gen(params):
     clean_index = 0
     noise_index = 0
     file_num = params['fileindex_start']
+    train_rows = []
+    eval_rows = []
 
     while file_num <= params['fileindex_end']:
         # generate clean speech
@@ -345,9 +348,20 @@ def main_gen(params):
         cleanfilename = 'clean_fileid_'+str(file_num)+'.wav'
         noisefilename = 'noise_fileid_'+str(file_num)+'.wav'
 
-        noisypath = os.path.join(params['noisyspeech_dir'], noisyfilename)
-        cleanpath = os.path.join(params['clean_proc_dir'], cleanfilename)
-        noisepath = os.path.join(params['noise_proc_dir'], noisefilename)
+        is_eval = False
+        if params.get('eval_stride', 0):
+            eval_idx = file_num - params['fileindex_start'] + 1
+            if eval_idx % params['eval_stride'] == 0:
+                is_eval = True
+
+        if is_eval:
+            noisypath = os.path.join(params['eval_noisyspeech_dir'], noisyfilename)
+            cleanpath = os.path.join(params['eval_clean_proc_dir'], cleanfilename)
+            noisepath = os.path.join(params['eval_noise_proc_dir'], noisefilename)
+        else:
+            noisypath = os.path.join(params['noisyspeech_dir'], noisyfilename)
+            cleanpath = os.path.join(params['clean_proc_dir'], cleanfilename)
+            noisepath = os.path.join(params['noise_proc_dir'], noisefilename)
 
         audio_signals = [noisy_snr, clean_snr, noise_snr]
         file_paths = [noisypath, cleanpath, noisepath]
@@ -359,9 +373,14 @@ def main_gen(params):
             except Exception as e:
                 print(str(e))
 
+        if is_eval:
+            eval_rows.append((cleanpath, noisepath, noisypath))
+        else:
+            train_rows.append((cleanpath, noisepath, noisypath))
 
     return clean_source_files, clean_clipped_files, clean_low_activity_files, \
-           noise_source_files, noise_clipped_files, noise_low_activity_files
+           noise_source_files, noise_clipped_files, noise_low_activity_files, \
+           train_rows, eval_rows
 
 
 def main_body():
@@ -458,6 +477,11 @@ def main_body():
     params['noisyspeech_dir'] = utils.get_dir(cfg, 'noisy_destination', 'noisy')
     params['clean_proc_dir'] = utils.get_dir(cfg, 'clean_destination', 'clean')
     params['noise_proc_dir'] = utils.get_dir(cfg, 'noise_destination', 'noise')
+    params['eval_stride'] = int(cfg.get('eval_stride', 0))
+    if params['eval_stride'] > 0:
+        params['eval_noisyspeech_dir'] = utils.get_dir(cfg, 'eval_noisy_destination', 'eval_noisy')
+        params['eval_clean_proc_dir'] = utils.get_dir(cfg, 'eval_clean_destination', 'eval_clean')
+        params['eval_noise_proc_dir'] = utils.get_dir(cfg, 'eval_noise_destination', 'eval_noise')
 
     def _cfg_bool(key, default=False):
         if key not in cfg:
@@ -515,6 +539,18 @@ def main_body():
     if 'speech_csv' in cfg.keys() and cfg['speech_csv'] != 'None':
         cleanfilenames = pd.read_csv(cfg['speech_csv'])
         cleanfilenames = cleanfilenames['filename']
+    elif 'speech_dir_root' in cfg.keys() and cfg['speech_dir_root'] != 'None':
+        root_dir = Path(cfg['speech_dir_root'])
+        replicas_subdir = cfg.get('replicas_subdir', 'replicas')
+        cleanfilenames = []
+        for call_dir in sorted(root_dir.iterdir()):
+            if not call_dir.is_dir():
+                continue
+            replicas_dir = call_dir / replicas_subdir
+            if not replicas_dir.is_dir():
+                continue
+            for path in sorted(replicas_dir.rglob('*.wav')):
+                cleanfilenames.append(str(path.resolve()))
     else:
         #cleanfilenames = glob.glob(os.path.join(clean_dir, params['audioformat']))
         cleanfilenames= []
@@ -674,7 +710,8 @@ def main_body():
 
     # Call main_gen() to generate audio
     clean_source_files, clean_clipped_files, clean_low_activity_files, \
-    noise_source_files, noise_clipped_files, noise_low_activity_files = main_gen(params)
+    noise_source_files, noise_clipped_files, noise_low_activity_files, \
+    train_rows, eval_rows = main_gen(params)
 
     # Create log directory if needed, and write log files of clipped and low activity files
     log_dir = utils.get_dir(cfg, 'log_dir', 'Logs')
@@ -699,6 +736,19 @@ def main_body():
     print("Of the " + str(total_noise) + " noise files analyzed, " + str(pct_noise_clipped) + \
           "% had clipping, and " + str(pct_noise_low_activity) + "% had low activity " + \
           "(below " + str(params['noise_activity_threshold']*100) + "% active percentage)")
+
+    train_csv = cfg.get('train_csv', os.path.join(log_dir, 'train_metadata.csv'))
+    with open(train_csv, mode='w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['clean_path', 'noise_path', 'noisy_path'])
+        writer.writerows(train_rows)
+
+    if params.get('eval_stride', 0) > 0:
+        eval_csv = cfg.get('eval_csv', os.path.join(log_dir, 'eval_metadata.csv'))
+        with open(eval_csv, mode='w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(['clean_path', 'noise_path', 'noisy_path'])
+            writer.writerows(eval_rows)
 
 
 if __name__ == '__main__':
