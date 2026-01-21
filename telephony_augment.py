@@ -11,10 +11,6 @@ import numpy as np
 from scipy import signal
 import audioop
 
-import noise_shaping
-
-EPS = np.finfo(float).eps
-
 
 def _butter_bandpass(lowcut, highcut, fs, order=4):
     nyq = 0.5 * fs
@@ -71,23 +67,6 @@ def quantize(audio, bits):
     audio = np.round((audio + 1.0) * 0.5 * levels) / levels
     return audio * 2.0 - 1.0
 
-
-def add_hum(audio, fs, hum_freq=50.0, harmonics=3, level_db=-45.0, level_mode="relative"):
-    if level_db is None:
-        return audio
-    duration = len(audio) / fs
-    t = np.linspace(0, duration, num=len(audio), endpoint=False)
-    hum = np.zeros_like(audio)
-    for i in range(1, harmonics + 1):
-        hum += np.sin(2.0 * np.pi * hum_freq * i * t)
-    hum /= max(harmonics, 1)
-    rms_target = 10 ** (level_db / 20.0)
-    if level_mode == "absolute":
-        hum *= rms_target
-    else:
-        rms_audio = np.sqrt(np.mean(audio ** 2) + EPS)
-        hum *= rms_target / max(rms_audio, EPS)
-    return audio + hum
 
 
 def apply_gain_variation(audio, fs, max_db=3.0, segment_s=1.0, rng=None):
@@ -183,7 +162,7 @@ def choose_codec(codec_mix, rng=None):
     return codec_mix[-1][0]
 
 
-def apply_telephony_augmentation(audio, fs, cfg, rng=None, role="clean"):
+def apply_telephony_augmentation(audio, fs, cfg, rng=None):
     if not cfg or not cfg.get("enable", False):
         return audio
 
@@ -224,17 +203,6 @@ def apply_telephony_augmentation(audio, fs, cfg, rng=None, role="clean"):
     else:
         audio_proc = quantize(audio_proc, quant_bits)
 
-    hum_component = None
-    if cfg.get("use_hum", False):
-        hum_component = add_hum(
-            np.zeros_like(audio_proc),
-            fs,
-            hum_freq=cfg.get("hum_freq", 50.0),
-            harmonics=int(cfg.get("hum_harmonics", 3)),
-            level_db=cfg.get("hum_level_db", -45.0),
-            level_mode=cfg.get("hum_level_mode", "relative"),
-        )
-
     gain_var_db = float(cfg.get("gain_variation_db", 0.0))
     if gain_var_db > 0:
         audio_proc = apply_gain_variation(
@@ -244,28 +212,5 @@ def apply_telephony_augmentation(audio, fs, cfg, rng=None, role="clean"):
             segment_s=float(cfg.get("gain_variation_segment_s", 1.0)),
             rng=rng,
         )
-
-    if cfg.get("noise_shape") and cfg["noise_shape"].get("enable"):
-        apply_to_clean = cfg["noise_shape"].get("apply_to_clean", False)
-        apply_to_noise = cfg["noise_shape"].get("apply_to_noise", True)
-        apply_to_noisy = cfg["noise_shape"].get("apply_to_noisy", False)
-        apply_shape = (
-            (role == "clean" and apply_to_clean)
-            or (role == "noise" and apply_to_noise)
-            or (role == "noisy" and apply_to_noisy)
-        )
-        if apply_shape:
-            target = cfg["noise_shape"].get("target", "hum")
-            if target in ("noise", "both"):
-                audio_proc = noise_shaping.apply_noise_shaping(
-                    audio_proc, fs, cfg["noise_shape"], rng=rng
-                )
-            if hum_component is not None and target in ("hum", "both"):
-                hum_component = noise_shaping.apply_noise_shaping(
-                    hum_component, fs, cfg["noise_shape"], rng=rng
-                )
-
-    if hum_component is not None:
-        audio_proc = audio_proc + hum_component
 
     return np.clip(audio_proc, -1.0, 1.0)

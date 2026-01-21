@@ -49,6 +49,35 @@ def _match_length(audio, target_len):
         return np.append(audio, pad)
     return audio
 
+
+def build_telephony_noise_mask(params, audio_samples_length):
+    """Build telephony noise mask from real telephony noise clips."""
+    if 'telephony_noise_files' not in params or not params['telephony_noise_files']:
+        return None
+    source_files = params['telephony_noise_files']
+    remaining_length = audio_samples_length
+    output_audio = np.zeros(0)
+
+    tries_left = MAXTRIES
+    idx = np.random.randint(0, np.size(source_files))
+    while remaining_length > 0 and tries_left > 0:
+        idx = (idx + 1) % np.size(source_files)
+        input_audio, fs_input = audioread(source_files[idx])
+        if input_audio is None or len(input_audio) == 0:
+            tries_left -= 1
+            continue
+        if fs_input != params['fs']:
+            input_audio = librosa.resample(input_audio, fs_input, params['fs'])
+        if len(input_audio) > remaining_length:
+            idx_seg = np.random.randint(0, len(input_audio) - remaining_length)
+            input_audio = input_audio[idx_seg:idx_seg + remaining_length]
+        output_audio = np.append(output_audio, input_audio)
+        remaining_length -= len(input_audio)
+
+    if len(output_audio) < audio_samples_length:
+        output_audio = _match_length(output_audio, audio_samples_length)
+    return output_audio
+
 def build_audio(is_clean, params, index, audio_samples_length=-1):
     '''Construct an audio signal from source files'''
 
@@ -95,7 +124,7 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
             sys.stderr.write("WARNING: Empty or unreadable audio: %s\n" % source_files[idx])
             continue
         if fs_input != fs_output:
-            input_audio = librosa.resample(input_audio, fs_input, fs_output)
+            input_audio = librosa.resample(y=input_audio, orig_sr=fs_input, target_sr=fs_output)
 
         # if current file is longer than remaining desired length, and this is
         # noise generation or this is training set, subsample it randomly
@@ -212,7 +241,7 @@ def main_gen(params):
         if params.get('telephony') and params['telephony'].get('enable') \
            and params['telephony'].get('apply_to_clean', True):
             clean = telephony_augment.apply_telephony_augmentation(
-                clean, params['fs'], params['telephony'], rng=random, role="clean"
+                clean, params['fs'], params['telephony'], rng=random
             )
             clean = _match_length(clean, clean_target_len)
 
@@ -222,7 +251,7 @@ def main_gen(params):
         if params.get('telephony') and params['telephony'].get('enable') \
            and params['telephony'].get('apply_to_noise', True):
             noise = telephony_augment.apply_telephony_augmentation(
-                noise, params['fs'], params['telephony'], rng=random, role="noise"
+                noise, params['fs'], params['telephony'], rng=random
             )
             noise = _match_length(noise, clean_target_len)
 
@@ -255,17 +284,17 @@ def main_gen(params):
         if params.get('telephony') and params['telephony'].get('enable'):
             if params['telephony'].get('apply_post_mix_clean', False):
                 clean_snr = telephony_augment.apply_telephony_augmentation(
-                    clean_snr, params['fs'], params['telephony'], rng=random, role="clean"
+                    clean_snr, params['fs'], params['telephony'], rng=random
                 )
                 post_mix_applied = True
             if params['telephony'].get('apply_post_mix_noise', False):
                 noise_snr = telephony_augment.apply_telephony_augmentation(
-                    noise_snr, params['fs'], params['telephony'], rng=random, role="noise"
+                    noise_snr, params['fs'], params['telephony'], rng=random
                 )
                 post_mix_applied = True
             if params['telephony'].get('apply_post_mix_noisy', False):
                 noisy_snr = telephony_augment.apply_telephony_augmentation(
-                    noisy_snr, params['fs'], params['telephony'], rng=random, role="noisy"
+                    noisy_snr, params['fs'], params['telephony'], rng=random
                 )
                 post_mix_applied = True
         if post_mix_applied:
@@ -278,6 +307,23 @@ def main_gen(params):
                 clean_snr = clean_snr / scale
                 noise_snr = noise_snr / scale
                 noisy_snr = noisy_snr / scale
+
+        telephony_mask = None
+        if params.get('telephony_noise') and params['telephony_noise'].get('enable'):
+            telephony_mask = build_telephony_noise_mask(
+                params, len(clean_snr)
+            )
+            if telephony_mask is not None:
+                telephony_mask = normalize(
+                    telephony_mask, target_level=params['telephony_noise']['level_db']
+                )
+                clean_snr = clean_snr + telephony_mask
+                noisy_snr = noisy_snr + telephony_mask
+                max_amp = max(abs(noisy_snr))
+                if max_amp >= 0.99:
+                    scale = max_amp / 0.99
+                    clean_snr = clean_snr / scale
+                    noisy_snr = noisy_snr / scale
         # unexpected clipping
         if is_clipped(clean_snr) or is_clipped(noise_snr) or is_clipped(noisy_snr):
             print("Warning: File #" + str(file_num) + " has unexpected clipping, " + \
@@ -447,39 +493,24 @@ def main_body():
         'wb_target_sr': _cfg_int('telephony_wb_target_sr', params['fs']),
         'quant_bits_nb': _cfg_int('telephony_quant_bits_nb', 8),
         'quant_bits_wb': _cfg_int('telephony_quant_bits_wb', 10),
-        'use_hum': _cfg_bool('telephony_use_hum', False),
-        'hum_freq': _cfg_float('telephony_hum_freq', 50.0),
-        'hum_harmonics': _cfg_int('telephony_hum_harmonics', 3),
-        'hum_level_db': _cfg_float('telephony_hum_level_db', -45.0),
-        'hum_level_mode': cfg.get('telephony_hum_level_mode', 'relative'),
         'gain_variation_db': _cfg_float('telephony_gain_variation_db', 0.0),
         'gain_variation_segment_s': _cfg_float('telephony_gain_variation_segment_s', 1.0),
-        'noise_shape': {
-            'enable': _cfg_bool('telephony_noise_shape_enable', False),
-            'target': cfg.get('telephony_noise_shape_target', 'hum'),
-            'apply_to_clean': _cfg_bool('telephony_noise_shape_apply_to_clean', True),
-            'apply_to_noise': _cfg_bool('telephony_noise_shape_apply_to_noise', True),
-            'apply_to_noisy': _cfg_bool('telephony_noise_shape_apply_to_noisy', False),
-            'seg_min_s': _cfg_float('telephony_noise_shape_seg_min_s', 0.5),
-            'seg_max_s': _cfg_float('telephony_noise_shape_seg_max_s', 2.0),
-            'fade_ms': _cfg_float('telephony_noise_shape_fade_ms', 100.0),
-            'gain_db_min': _cfg_float('telephony_noise_shape_gain_db_min', -25.0),
-            'gain_db_max': _cfg_float('telephony_noise_shape_gain_db_max', -5.0),
-            'filter_probs': {
-                'bandpass': _cfg_float('telephony_noise_shape_prob_bandpass', 0.5),
-                'lowpass': _cfg_float('telephony_noise_shape_prob_lowpass', 0.25),
-                'highpass': _cfg_float('telephony_noise_shape_prob_highpass', 0.25),
-            },
-            'band_low_min': _cfg_float('telephony_noise_shape_band_low_min', 200.0),
-            'band_low_max': _cfg_float('telephony_noise_shape_band_low_max', 800.0),
-            'band_high_min': _cfg_float('telephony_noise_shape_band_high_min', 2000.0),
-            'band_high_max': _cfg_float('telephony_noise_shape_band_high_max', 6000.0),
-            'lp_min': _cfg_float('telephony_noise_shape_lp_min', 1500.0),
-            'lp_max': _cfg_float('telephony_noise_shape_lp_max', 6000.0),
-            'hp_min': _cfg_float('telephony_noise_shape_hp_min', 100.0),
-            'hp_max': _cfg_float('telephony_noise_shape_hp_max', 1000.0),
-        },
     }
+
+    params['telephony_noise'] = {
+        'enable': _cfg_bool('telephony_noise_enable', False),
+        'dir': cfg.get('telephony_noise_dir', 'None'),
+        'level_db': _cfg_float('telephony_noise_level_db', -40.0),
+    }
+    if params['telephony_noise']['enable']:
+        noise_dir = params['telephony_noise']['dir']
+        if noise_dir == 'None' or not os.path.exists(noise_dir):
+            raise ValueError('telephony_noise_dir is required and must exist')
+        telephony_noise_files = []
+        for path in Path(noise_dir).rglob('*.wav'):
+            telephony_noise_files.append(str(path.resolve()))
+        shuffle(telephony_noise_files)
+        params['telephony_noise_files'] = telephony_noise_files
 
     if 'speech_csv' in cfg.keys() and cfg['speech_csv'] != 'None':
         cleanfilenames = pd.read_csv(cfg['speech_csv'])
