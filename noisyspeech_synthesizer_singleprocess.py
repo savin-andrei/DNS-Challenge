@@ -406,9 +406,10 @@ def main_body():
     cfg = params['cfg']
 
     clean_dir = os.path.join(os.path.dirname(__file__), 'datasets/clean')
-
     if cfg.get('speech_dir', 'None') != 'None':
         clean_dir = cfg.get('speech_dir')
+    elif cfg.get('speech_dir_root', 'None') != 'None':
+        clean_dir = cfg.get('speech_dir_root')
     if not os.path.exists(clean_dir):
         assert False, ('Clean speech data is required')
 
