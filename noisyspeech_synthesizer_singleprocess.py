@@ -212,7 +212,7 @@ def main_gen(params):
         if params.get('telephony') and params['telephony'].get('enable') \
            and params['telephony'].get('apply_to_clean', True):
             clean = telephony_augment.apply_telephony_augmentation(
-                clean, params['fs'], params['telephony'], rng=random
+                clean, params['fs'], params['telephony'], rng=random, role="clean"
             )
             clean = _match_length(clean, clean_target_len)
 
@@ -222,7 +222,7 @@ def main_gen(params):
         if params.get('telephony') and params['telephony'].get('enable') \
            and params['telephony'].get('apply_to_noise', True):
             noise = telephony_augment.apply_telephony_augmentation(
-                noise, params['fs'], params['telephony'], rng=random
+                noise, params['fs'], params['telephony'], rng=random, role="noise"
             )
             noise = _match_length(noise, clean_target_len)
 
@@ -255,17 +255,17 @@ def main_gen(params):
         if params.get('telephony') and params['telephony'].get('enable'):
             if params['telephony'].get('apply_post_mix_clean', False):
                 clean_snr = telephony_augment.apply_telephony_augmentation(
-                    clean_snr, params['fs'], params['telephony'], rng=random
+                    clean_snr, params['fs'], params['telephony'], rng=random, role="clean"
                 )
                 post_mix_applied = True
             if params['telephony'].get('apply_post_mix_noise', False):
                 noise_snr = telephony_augment.apply_telephony_augmentation(
-                    noise_snr, params['fs'], params['telephony'], rng=random
+                    noise_snr, params['fs'], params['telephony'], rng=random, role="noise"
                 )
                 post_mix_applied = True
             if params['telephony'].get('apply_post_mix_noisy', False):
                 noisy_snr = telephony_augment.apply_telephony_augmentation(
-                    noisy_snr, params['fs'], params['telephony'], rng=random
+                    noisy_snr, params['fs'], params['telephony'], rng=random, role="noisy"
                 )
                 post_mix_applied = True
         if post_mix_applied:
@@ -454,6 +454,31 @@ def main_body():
         'hum_level_mode': cfg.get('telephony_hum_level_mode', 'relative'),
         'gain_variation_db': _cfg_float('telephony_gain_variation_db', 0.0),
         'gain_variation_segment_s': _cfg_float('telephony_gain_variation_segment_s', 1.0),
+        'noise_shape': {
+            'enable': _cfg_bool('telephony_noise_shape_enable', False),
+            'target': cfg.get('telephony_noise_shape_target', 'hum'),
+            'apply_to_clean': _cfg_bool('telephony_noise_shape_apply_to_clean', True),
+            'apply_to_noise': _cfg_bool('telephony_noise_shape_apply_to_noise', True),
+            'apply_to_noisy': _cfg_bool('telephony_noise_shape_apply_to_noisy', False),
+            'seg_min_s': _cfg_float('telephony_noise_shape_seg_min_s', 0.5),
+            'seg_max_s': _cfg_float('telephony_noise_shape_seg_max_s', 2.0),
+            'fade_ms': _cfg_float('telephony_noise_shape_fade_ms', 100.0),
+            'gain_db_min': _cfg_float('telephony_noise_shape_gain_db_min', -25.0),
+            'gain_db_max': _cfg_float('telephony_noise_shape_gain_db_max', -5.0),
+            'filter_probs': {
+                'bandpass': _cfg_float('telephony_noise_shape_prob_bandpass', 0.5),
+                'lowpass': _cfg_float('telephony_noise_shape_prob_lowpass', 0.25),
+                'highpass': _cfg_float('telephony_noise_shape_prob_highpass', 0.25),
+            },
+            'band_low_min': _cfg_float('telephony_noise_shape_band_low_min', 200.0),
+            'band_low_max': _cfg_float('telephony_noise_shape_band_low_max', 800.0),
+            'band_high_min': _cfg_float('telephony_noise_shape_band_high_min', 2000.0),
+            'band_high_max': _cfg_float('telephony_noise_shape_band_high_max', 6000.0),
+            'lp_min': _cfg_float('telephony_noise_shape_lp_min', 1500.0),
+            'lp_max': _cfg_float('telephony_noise_shape_lp_max', 6000.0),
+            'hp_min': _cfg_float('telephony_noise_shape_hp_min', 100.0),
+            'hp_max': _cfg_float('telephony_noise_shape_hp_max', 1000.0),
+        },
     }
 
     if 'speech_csv' in cfg.keys() and cfg['speech_csv'] != 'None':

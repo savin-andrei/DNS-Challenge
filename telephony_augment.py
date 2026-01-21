@@ -11,6 +11,8 @@ import numpy as np
 from scipy import signal
 import audioop
 
+import noise_shaping
+
 EPS = np.finfo(float).eps
 
 
@@ -181,7 +183,7 @@ def choose_codec(codec_mix, rng=None):
     return codec_mix[-1][0]
 
 
-def apply_telephony_augmentation(audio, fs, cfg, rng=None):
+def apply_telephony_augmentation(audio, fs, cfg, rng=None, role="clean"):
     if not cfg or not cfg.get("enable", False):
         return audio
 
@@ -222,9 +224,10 @@ def apply_telephony_augmentation(audio, fs, cfg, rng=None):
     else:
         audio_proc = quantize(audio_proc, quant_bits)
 
+    hum_component = None
     if cfg.get("use_hum", False):
-        audio_proc = add_hum(
-            audio_proc,
+        hum_component = add_hum(
+            np.zeros_like(audio_proc),
             fs,
             hum_freq=cfg.get("hum_freq", 50.0),
             harmonics=int(cfg.get("hum_harmonics", 3)),
@@ -241,5 +244,28 @@ def apply_telephony_augmentation(audio, fs, cfg, rng=None):
             segment_s=float(cfg.get("gain_variation_segment_s", 1.0)),
             rng=rng,
         )
+
+    if cfg.get("noise_shape") and cfg["noise_shape"].get("enable"):
+        apply_to_clean = cfg["noise_shape"].get("apply_to_clean", False)
+        apply_to_noise = cfg["noise_shape"].get("apply_to_noise", True)
+        apply_to_noisy = cfg["noise_shape"].get("apply_to_noisy", False)
+        apply_shape = (
+            (role == "clean" and apply_to_clean)
+            or (role == "noise" and apply_to_noise)
+            or (role == "noisy" and apply_to_noisy)
+        )
+        if apply_shape:
+            target = cfg["noise_shape"].get("target", "hum")
+            if target in ("noise", "both"):
+                audio_proc = noise_shaping.apply_noise_shaping(
+                    audio_proc, fs, cfg["noise_shape"], rng=rng
+                )
+            if hum_component is not None and target in ("hum", "both"):
+                hum_component = noise_shaping.apply_noise_shaping(
+                    hum_component, fs, cfg["noise_shape"], rng=rng
+                )
+
+    if hum_component is not None:
+        audio_proc = audio_proc + hum_component
 
     return np.clip(audio_proc, -1.0, 1.0)
