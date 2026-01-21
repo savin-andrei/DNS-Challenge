@@ -407,8 +407,8 @@ def main_body():
 
     clean_dir = os.path.join(os.path.dirname(__file__), 'datasets/clean')
 
-    if cfg['speech_dir'] != 'None':
-        clean_dir = cfg['speech_dir']
+    if cfg.get('speech_dir', 'None') != 'None':
+        clean_dir = cfg.get('speech_dir')
     if not os.path.exists(clean_dir):
         assert False, ('Clean speech data is required')
 
