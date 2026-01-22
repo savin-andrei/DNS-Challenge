@@ -116,23 +116,33 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
 
     # iterate through multiple clips until we have a long enough signal
     tries_left = MAXTRIES
+    perf = params.get('perf_detail', None)
     while remaining_length > 0 and tries_left > 0:
 
         # read next audio file and resample if necessary
 
         idx = (idx + 1) % np.size(source_files)
+        t0 = time.perf_counter()
         input_audio, fs_input = audioread(source_files[idx])
+        if perf is not None:
+            perf["read_s"] += time.perf_counter() - t0
         if input_audio is None or len(input_audio) == 0:
             sys.stderr.write("WARNING: Empty or unreadable audio: %s\n" % source_files[idx])
             continue
         if fs_input != fs_output:
+            t0 = time.perf_counter()
             input_audio = librosa.resample(y=input_audio, orig_sr=fs_input, target_sr=fs_output)
+            if perf is not None:
+                perf["resample_s"] += time.perf_counter() - t0
 
         # if current file is longer than remaining desired length, and this is
         # noise generation or this is training set, subsample it randomly
         if len(input_audio) > remaining_length and (not is_clean or not params['is_test_set']):
+            t0 = time.perf_counter()
             idx_seg = np.random.randint(0, len(input_audio)-remaining_length)
             input_audio = input_audio[idx_seg:idx_seg+remaining_length]
+            if perf is not None:
+                perf["crop_s"] += time.perf_counter() - t0
 
         # check for clipping, and if found move onto next file
         if is_clipped(input_audio):
@@ -141,15 +151,21 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
             continue
 
         # concatenate current input audio to output audio stream
+        t0 = time.perf_counter()
         files_used.append(source_files[idx])
         output_audio = np.append(output_audio, input_audio)
         remaining_length -= len(input_audio)
+        if perf is not None:
+            perf["concat_s"] += time.perf_counter() - t0
 
         # add some silence if we have not reached desired audio length
         if remaining_length > 0:
+            t0 = time.perf_counter()
             silence_len = min(remaining_length, len(silence))
             output_audio = np.append(output_audio, silence[:silence_len])
             remaining_length -= silence_len
+            if perf is not None:
+                perf["silence_s"] += time.perf_counter() - t0
 
     if tries_left == 0 and not is_clean and 'noisedirs' in params.keys():
         print("There are not enough non-clipped files in the " + noisedirs[idx_n_dir] + \
@@ -183,7 +199,11 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
         if activity_threshold == 0.0:
             break
 
+        t0 = time.perf_counter()
         percactive = activitydetector(audio=audio)
+        perf = params.get('perf_detail', None)
+        if perf is not None:
+            perf["activity_s"] += time.perf_counter() - t0
         if percactive > activity_threshold:
             break
         else:
@@ -218,6 +238,15 @@ def main_gen(params):
         "write_s": 0.0,
         "files": 0,
     }
+    perf_detail = {
+        "read_s": 0.0,
+        "resample_s": 0.0,
+        "crop_s": 0.0,
+        "concat_s": 0.0,
+        "silence_s": 0.0,
+        "activity_s": 0.0,
+    }
+    params["perf_detail"] = perf_detail
     perf_interval = params.get('perf_interval', 0)
 
     while file_num <= params['fileindex_end']:
@@ -406,12 +435,20 @@ def main_gen(params):
         perf["files"] += 1
         if perf_interval and perf["files"] % perf_interval == 0:
             avg = {k: perf[k] / max(perf["files"], 1) for k in perf if k.endswith("_s")}
+            avg_detail = {k: perf_detail[k] / max(perf["files"], 1) for k in perf_detail}
             print(
                 "Perf avg (s/file): clean_gen={:.3f} noise_gen={:.3f} tele_clean={:.3f} "
                 "tele_noise={:.3f} mix={:.3f} tele_mask={:.3f} write={:.3f}".format(
                     avg["clean_gen_s"], avg["noise_gen_s"], avg["telephony_clean_s"],
                     avg["telephony_noise_s"], avg["mix_s"], avg["telephony_mask_s"],
                     avg["write_s"]
+                )
+            )
+            print(
+                "Perf build_audio avg (s/file): read={:.3f} resample={:.3f} crop={:.3f} "
+                "concat={:.3f} silence={:.3f} activity={:.3f}".format(
+                    avg_detail["read_s"], avg_detail["resample_s"], avg_detail["crop_s"],
+                    avg_detail["concat_s"], avg_detail["silence_s"], avg_detail["activity_s"]
                 )
             )
 
@@ -777,12 +814,20 @@ def main_body():
           "(below " + str(params['noise_activity_threshold']*100) + "% active percentage)")
     if perf["files"] > 0:
         avg = {k: perf[k] / perf["files"] for k in perf if k.endswith("_s")}
+        avg_detail = {k: perf_detail[k] / perf["files"] for k in perf_detail}
         print(
             "Perf avg (s/file): clean_gen={:.3f} noise_gen={:.3f} tele_clean={:.3f} "
             "tele_noise={:.3f} mix={:.3f} tele_mask={:.3f} write={:.3f}".format(
                 avg["clean_gen_s"], avg["noise_gen_s"], avg["telephony_clean_s"],
                 avg["telephony_noise_s"], avg["mix_s"], avg["telephony_mask_s"],
                 avg["write_s"]
+            )
+        )
+        print(
+            "Perf build_audio avg (s/file): read={:.3f} resample={:.3f} crop={:.3f} "
+            "concat={:.3f} silence={:.3f} activity={:.3f}".format(
+                avg_detail["read_s"], avg_detail["resample_s"], avg_detail["crop_s"],
+                avg_detail["concat_s"], avg_detail["silence_s"], avg_detail["activity_s"]
             )
         )
 
