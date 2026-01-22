@@ -14,6 +14,7 @@ import configparser as CP
 from random import shuffle
 import random
 import csv
+import time
 
 import librosa
 import numpy as np
@@ -207,11 +208,24 @@ def main_gen(params):
     file_num = params['fileindex_start']
     train_rows = []
     eval_rows = []
+    perf = {
+        "clean_gen_s": 0.0,
+        "noise_gen_s": 0.0,
+        "telephony_clean_s": 0.0,
+        "telephony_noise_s": 0.0,
+        "mix_s": 0.0,
+        "telephony_mask_s": 0.0,
+        "write_s": 0.0,
+        "files": 0,
+    }
+    perf_interval = params.get('perf_interval', 0)
 
     while file_num <= params['fileindex_end']:
         # generate clean speech
+        t0 = time.perf_counter()
         clean, clean_sf, clean_cf, clean_laf, clean_index = \
             gen_audio(True, params, clean_index)
+        perf["clean_gen_s"] += time.perf_counter() - t0
 
         if params.get('use_rir', True) and params.get('myrir'):
             # add reverb with selected RIR
@@ -243,20 +257,26 @@ def main_gen(params):
         clean_target_len = len(clean)
         if params.get('telephony') and params['telephony'].get('enable') \
            and params['telephony'].get('apply_to_clean', True):
+            t0 = time.perf_counter()
             clean = telephony_augment.apply_telephony_augmentation(
                 clean, params['fs'], params['telephony'], rng=random
             )
             clean = _match_length(clean, clean_target_len)
+            perf["telephony_clean_s"] += time.perf_counter() - t0
 
         # generate noise
+        t0 = time.perf_counter()
         noise, noise_sf, noise_cf, noise_laf, noise_index = \
             gen_audio(False, params, noise_index, clean_target_len)
+        perf["noise_gen_s"] += time.perf_counter() - t0
         if params.get('telephony') and params['telephony'].get('enable') \
            and params['telephony'].get('apply_to_noise', True):
+            t0 = time.perf_counter()
             noise = telephony_augment.apply_telephony_augmentation(
                 noise, params['fs'], params['telephony'], rng=random
             )
             noise = _match_length(noise, clean_target_len)
+            perf["telephony_noise_s"] += time.perf_counter() - t0
 
         clean_clipped_files += clean_cf
         clean_low_activity_files += clean_laf
@@ -273,10 +293,12 @@ def main_gen(params):
         else:
             snr = np.random.randint(params['snr_lower'], params['snr_upper'])
 
+        t0 = time.perf_counter()
         clean_snr, noise_snr, noisy_snr, target_level = segmental_snr_mixer(params=params,
                                                                   clean=clean,
                                                                   noise=noise,
                                                                   snr=snr)
+        perf["mix_s"] += time.perf_counter() - t0
         # Uncomment the below lines if you need segmental SNR and comment the above lines using snr_mixer
         #clean_snr, noise_snr, noisy_snr, target_level = segmental_snr_mixer(params=params, 
         #                                                         clean=clean, 
@@ -313,6 +335,7 @@ def main_gen(params):
 
         telephony_mask = None
         if params.get('telephony_noise') and params['telephony_noise'].get('enable'):
+            t0 = time.perf_counter()
             telephony_mask = build_telephony_noise_mask(
                 params, len(clean_snr)
             )
@@ -327,6 +350,7 @@ def main_gen(params):
                     scale = max_amp / 0.99
                     clean_snr = clean_snr / scale
                     noisy_snr = noisy_snr / scale
+            perf["telephony_mask_s"] += time.perf_counter() - t0
         # unexpected clipping
         if is_clipped(clean_snr) or is_clipped(noise_snr) or is_clipped(noisy_snr):
             print("Warning: File #" + str(file_num) + " has unexpected clipping, " + \
@@ -367,20 +391,33 @@ def main_gen(params):
         file_paths = [noisypath, cleanpath, noisepath]
 
         file_num += 1
+        t0 = time.perf_counter()
         for i in range(len(audio_signals)):
             try:
                 audiowrite(file_paths[i], audio_signals[i], params['fs'])
             except Exception as e:
                 print(str(e))
+        perf["write_s"] += time.perf_counter() - t0
 
         if is_eval:
             eval_rows.append((cleanpath, noisepath, noisypath))
         else:
             train_rows.append((cleanpath, noisepath, noisypath))
+        perf["files"] += 1
+        if perf_interval and perf["files"] % perf_interval == 0:
+            avg = {k: perf[k] / max(perf["files"], 1) for k in perf if k.endswith("_s")}
+            print(
+                "Perf avg (s/file): clean_gen={:.3f} noise_gen={:.3f} tele_clean={:.3f} "
+                "tele_noise={:.3f} mix={:.3f} tele_mask={:.3f} write={:.3f}".format(
+                    avg["clean_gen_s"], avg["noise_gen_s"], avg["telephony_clean_s"],
+                    avg["telephony_noise_s"], avg["mix_s"], avg["telephony_mask_s"],
+                    avg["write_s"]
+                )
+            )
 
     return clean_source_files, clean_clipped_files, clean_low_activity_files, \
            noise_source_files, noise_clipped_files, noise_low_activity_files, \
-           train_rows, eval_rows
+           train_rows, eval_rows, perf
 
 
 def main_body():
@@ -478,6 +515,7 @@ def main_body():
     params['noisyspeech_dir'] = utils.get_dir(cfg, 'noisy_destination', 'noisy')
     params['clean_proc_dir'] = utils.get_dir(cfg, 'clean_destination', 'clean')
     params['noise_proc_dir'] = utils.get_dir(cfg, 'noise_destination', 'noise')
+    params['perf_interval'] = int(cfg.get('perf_interval', 0))
     params['eval_stride'] = int(cfg.get('eval_stride', 0))
     if params['eval_stride'] > 0:
         params['eval_noisyspeech_dir'] = utils.get_dir(cfg, 'eval_noisy_destination', 'eval_noisy')
@@ -712,7 +750,7 @@ def main_body():
     # Call main_gen() to generate audio
     clean_source_files, clean_clipped_files, clean_low_activity_files, \
     noise_source_files, noise_clipped_files, noise_low_activity_files, \
-    train_rows, eval_rows = main_gen(params)
+    train_rows, eval_rows, perf = main_gen(params)
 
     # Create log directory if needed, and write log files of clipped and low activity files
     log_dir = utils.get_dir(cfg, 'log_dir', 'Logs')
@@ -737,6 +775,16 @@ def main_body():
     print("Of the " + str(total_noise) + " noise files analyzed, " + str(pct_noise_clipped) + \
           "% had clipping, and " + str(pct_noise_low_activity) + "% had low activity " + \
           "(below " + str(params['noise_activity_threshold']*100) + "% active percentage)")
+    if perf["files"] > 0:
+        avg = {k: perf[k] / perf["files"] for k in perf if k.endswith("_s")}
+        print(
+            "Perf avg (s/file): clean_gen={:.3f} noise_gen={:.3f} tele_clean={:.3f} "
+            "tele_noise={:.3f} mix={:.3f} tele_mask={:.3f} write={:.3f}".format(
+                avg["clean_gen_s"], avg["noise_gen_s"], avg["telephony_clean_s"],
+                avg["telephony_noise_s"], avg["mix_s"], avg["telephony_mask_s"],
+                avg["write_s"]
+            )
+        )
 
     train_csv = cfg.get('train_csv', os.path.join(log_dir, 'train_metadata.csv'))
     with open(train_csv, mode='w', newline='') as csvfile:

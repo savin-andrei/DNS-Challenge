@@ -60,6 +60,7 @@ def mulaw_roundtrip(audio):
 
 
 def quantize(audio, bits):
+    print("quantize")
     if bits >= 16:
         return audio
     levels = (1 << bits) - 1
@@ -110,7 +111,8 @@ def _ffmpeg_codec_roundtrip(audio, fs, codec):
             subprocess.run(cmd_enc, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             subprocess.run(cmd_dec, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             return _read_wav(out_wav)
-        except Exception:
+        except Exception as e:
+            print(e)
             return None
 
 
