@@ -148,6 +148,8 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
         if perf is not None:
             perf["read_s"] += time.perf_counter() - t0
         if input_audio is None or len(input_audio) == 0:
+            if perf is not None:
+                perf["read_empty"] += 1
             sys.stderr.write("WARNING: Empty or unreadable audio: %s\n" % source_files[idx])
             continue
         if fs_input != fs_output:
@@ -167,6 +169,8 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
 
         # check for clipping, and if found move onto next file
         if is_clipped(input_audio):
+            if perf is not None:
+                perf["clipped"] += 1
             clipped_files.append(source_files[idx])
             tries_left -= 1
             continue
@@ -199,6 +203,10 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
 
     if perf is not None:
         perf["build_total_s"] += time.perf_counter() - t_build_start
+        if is_clean:
+            perf["build_files_clean"] += len(files_used)
+        else:
+            perf["build_files_noise"] += len(files_used)
 
     return output_audio, files_used, clipped_files, idx
 
@@ -217,6 +225,7 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
         activity_threshold = params['noise_activity_threshold']
 
     t_gen_start = time.perf_counter()
+    perf = params.get('perf_detail', None)
     attempts = 0
     while True:
         attempts += 1
@@ -225,6 +234,11 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
 
         clipped_files += new_clipped_files
         if len(audio) < audio_samples_length:
+            if perf is not None:
+                if is_clean:
+                    perf["short_clean"] += 1
+                else:
+                    perf["short_noise"] += 1
             continue
 
         if activity_threshold == 0.0:
@@ -232,18 +246,26 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
 
         t0 = time.perf_counter()
         percactive = activitydetector(audio=audio)
-        perf = params.get('perf_detail', None)
         if perf is not None:
             perf["activity_s"] += time.perf_counter() - t0
+            perf["activity_calls"] += 1
         if percactive > activity_threshold:
             break
         else:
             low_activity_files += source_files
+            if perf is not None:
+                if is_clean:
+                    perf["low_activity_clean"] += 1
+                else:
+                    perf["low_activity_noise"] += 1
 
-    perf = params.get('perf_detail', None)
     if perf is not None:
         perf["gen_total_s"] += time.perf_counter() - t_gen_start
         perf["gen_attempts"] += attempts
+        if is_clean:
+            perf["gen_attempts_clean"] += attempts
+        else:
+            perf["gen_attempts_noise"] += attempts
     return audio, source_files, clipped_files, low_activity_files, index
 
 
@@ -266,8 +288,10 @@ def main_gen(params):
     perf = {
         "clean_gen_s": 0.0,
         "noise_gen_s": 0.0,
+        "rir_s": 0.0,
         "telephony_clean_s": 0.0,
         "telephony_noise_s": 0.0,
+        "telephony_post_s": 0.0,
         "mix_s": 0.0,
         "telephony_mask_s": 0.0,
         "write_s": 0.0,
@@ -283,8 +307,19 @@ def main_gen(params):
         "build_total_s": 0.0,
         "gen_total_s": 0.0,
         "gen_attempts": 0,
+        "gen_attempts_clean": 0,
+        "gen_attempts_noise": 0,
         "attempt_s": 0.0,
         "attempts": 0,
+        "read_empty": 0,
+        "clipped": 0,
+        "short_clean": 0,
+        "short_noise": 0,
+        "low_activity_clean": 0,
+        "low_activity_noise": 0,
+        "build_files_clean": 0,
+        "build_files_noise": 0,
+        "activity_calls": 0,
     }
     params["perf_detail"] = perf_detail
     perf_interval = params.get('perf_interval', 0)
@@ -297,6 +332,7 @@ def main_gen(params):
         perf["clean_gen_s"] += time.perf_counter() - t0
 
         if params.get('use_rir', True) and params.get('myrir'):
+            t0 = time.perf_counter()
             # add reverb with selected RIR
             rir_index = random.randint(0, len(params['myrir']) - 1)
 
@@ -323,6 +359,7 @@ def main_gen(params):
                 #print(my_channel)
 
             clean = add_pyreverb(clean, samples_rir_ch)
+            perf["rir_s"] += time.perf_counter() - t0
         clean_target_len = len(clean)
         if params.get('telephony') and params['telephony'].get('enable') \
            and params['telephony'].get('apply_to_clean', True):
@@ -375,7 +412,9 @@ def main_gen(params):
         #                                                         snr=snr)
 
         post_mix_applied = False
+        t_post_start = None
         if params.get('telephony') and params['telephony'].get('enable'):
+            t_post_start = time.perf_counter()
             if params['telephony'].get('apply_post_mix_clean', False):
                 clean_snr = telephony_augment.apply_telephony_augmentation(
                     clean_snr, params['fs'], params['telephony'], rng=random
@@ -401,6 +440,8 @@ def main_gen(params):
                 clean_snr = clean_snr / scale
                 noise_snr = noise_snr / scale
                 noisy_snr = noisy_snr / scale
+            if t_post_start is not None:
+                perf["telephony_post_s"] += time.perf_counter() - t_post_start
 
         telephony_mask = None
         if params.get('telephony_noise') and params['telephony_noise'].get('enable'):
@@ -477,10 +518,12 @@ def main_gen(params):
             avg = {k: perf[k] / max(perf["files"], 1) for k in perf if k.endswith("_s")}
             avg_detail = {k: perf_detail[k] / max(perf["files"], 1) for k in perf_detail}
             print(
-                "Perf avg (s/file): clean_gen={:.3f} noise_gen={:.3f} tele_clean={:.3f} "
-                "tele_noise={:.3f} mix={:.3f} tele_mask={:.3f} write={:.3f}".format(
-                    avg["clean_gen_s"], avg["noise_gen_s"], avg["telephony_clean_s"],
-                    avg["telephony_noise_s"], avg["mix_s"], avg["telephony_mask_s"],
+                "Perf avg (s/file): clean_gen={:.3f} noise_gen={:.3f} rir={:.3f} "
+                "tele_clean={:.3f} tele_noise={:.3f} tele_post={:.3f} mix={:.3f} "
+                "tele_mask={:.3f} write={:.3f}".format(
+                    avg["clean_gen_s"], avg["noise_gen_s"], avg["rir_s"],
+                    avg["telephony_clean_s"], avg["telephony_noise_s"],
+                    avg["telephony_post_s"], avg["mix_s"], avg["telephony_mask_s"],
                     avg["write_s"]
                 )
             )
@@ -488,11 +531,37 @@ def main_gen(params):
             print(
                 "Perf build_audio avg (s/file): read={:.3f} resample={:.3f} crop={:.3f} "
                 "concat={:.3f} silence={:.3f} activity={:.3f} build_total={:.3f} "
-                "gen_total={:.3f} gen_attempts={:.2f} attempt_avg={:.3f}".format(
+                "gen_total={:.3f} gen_attempts={:.2f} read_attempts={:.2f} "
+                "attempt_avg={:.3f}".format(
                     avg_detail["read_s"], avg_detail["resample_s"], avg_detail["crop_s"],
                     avg_detail["concat_s"], avg_detail["silence_s"], avg_detail["activity_s"],
                     avg_detail["build_total_s"], avg_detail["gen_total_s"],
-                    avg_detail["gen_attempts"], attempt_avg
+                    avg_detail["gen_attempts"], avg_detail["attempts"], attempt_avg
+                )
+            )
+            clean_files_per_build = perf_detail["build_files_clean"] / max(
+                perf_detail["gen_attempts_clean"], 1
+            )
+            noise_files_per_build = perf_detail["build_files_noise"] / max(
+                perf_detail["gen_attempts_noise"], 1
+            )
+            activity_call_avg = perf_detail["activity_s"] / max(
+                perf_detail["activity_calls"], 1
+            )
+            print(
+                "Perf gen counts avg (per file): gen_clean={:.2f} gen_noise={:.2f} "
+                "empty_reads={:.2f} clipped_reads={:.2f} short_clean={:.2f} "
+                "short_noise={:.2f} low_act_clean={:.2f} low_act_noise={:.2f}".format(
+                    avg_detail["gen_attempts_clean"], avg_detail["gen_attempts_noise"],
+                    avg_detail["read_empty"], avg_detail["clipped"],
+                    avg_detail["short_clean"], avg_detail["short_noise"],
+                    avg_detail["low_activity_clean"], avg_detail["low_activity_noise"]
+                )
+            )
+            print(
+                "Perf gen build avg: clean_files/build={:.2f} noise_files/build={:.2f} "
+                "activity_call_avg={:.3f}".format(
+                    clean_files_per_build, noise_files_per_build, activity_call_avg
                 )
             )
 
@@ -857,13 +926,16 @@ def main_body():
           "% had clipping, and " + str(pct_noise_low_activity) + "% had low activity " + \
           "(below " + str(params['noise_activity_threshold']*100) + "% active percentage)")
     if perf["files"] > 0:
+        perf_detail = params.get("perf_detail", {})
         avg = {k: perf[k] / perf["files"] for k in perf if k.endswith("_s")}
         avg_detail = {k: perf_detail[k] / perf["files"] for k in perf_detail}
         print(
-            "Perf avg (s/file): clean_gen={:.3f} noise_gen={:.3f} tele_clean={:.3f} "
-            "tele_noise={:.3f} mix={:.3f} tele_mask={:.3f} write={:.3f}".format(
-                avg["clean_gen_s"], avg["noise_gen_s"], avg["telephony_clean_s"],
-                avg["telephony_noise_s"], avg["mix_s"], avg["telephony_mask_s"],
+            "Perf avg (s/file): clean_gen={:.3f} noise_gen={:.3f} rir={:.3f} "
+            "tele_clean={:.3f} tele_noise={:.3f} tele_post={:.3f} mix={:.3f} "
+            "tele_mask={:.3f} write={:.3f}".format(
+                avg["clean_gen_s"], avg["noise_gen_s"], avg["rir_s"],
+                avg["telephony_clean_s"], avg["telephony_noise_s"],
+                avg["telephony_post_s"], avg["mix_s"], avg["telephony_mask_s"],
                 avg["write_s"]
             )
         )
@@ -871,11 +943,37 @@ def main_body():
         print(
             "Perf build_audio avg (s/file): read={:.3f} resample={:.3f} crop={:.3f} "
             "concat={:.3f} silence={:.3f} activity={:.3f} build_total={:.3f} "
-            "gen_total={:.3f} gen_attempts={:.2f} attempt_avg={:.3f}".format(
+            "gen_total={:.3f} gen_attempts={:.2f} read_attempts={:.2f} "
+            "attempt_avg={:.3f}".format(
                 avg_detail["read_s"], avg_detail["resample_s"], avg_detail["crop_s"],
                 avg_detail["concat_s"], avg_detail["silence_s"], avg_detail["activity_s"],
                 avg_detail["build_total_s"], avg_detail["gen_total_s"],
-                avg_detail["gen_attempts"], attempt_avg
+                avg_detail["gen_attempts"], avg_detail["attempts"], attempt_avg
+            )
+        )
+        clean_files_per_build = perf_detail["build_files_clean"] / max(
+            perf_detail["gen_attempts_clean"], 1
+        )
+        noise_files_per_build = perf_detail["build_files_noise"] / max(
+            perf_detail["gen_attempts_noise"], 1
+        )
+        activity_call_avg = perf_detail["activity_s"] / max(
+            perf_detail["activity_calls"], 1
+        )
+        print(
+            "Perf gen counts avg (per file): gen_clean={:.2f} gen_noise={:.2f} "
+            "empty_reads={:.2f} clipped_reads={:.2f} short_clean={:.2f} "
+            "short_noise={:.2f} low_act_clean={:.2f} low_act_noise={:.2f}".format(
+                avg_detail["gen_attempts_clean"], avg_detail["gen_attempts_noise"],
+                avg_detail["read_empty"], avg_detail["clipped"],
+                avg_detail["short_clean"], avg_detail["short_noise"],
+                avg_detail["low_activity_clean"], avg_detail["low_activity_noise"]
+            )
+        )
+        print(
+            "Perf gen build avg: clean_files/build={:.2f} noise_files/build={:.2f} "
+            "activity_call_avg={:.3f}".format(
+                clean_files_per_build, noise_files_per_build, activity_call_avg
             )
         )
 
