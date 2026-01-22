@@ -76,7 +76,7 @@ def audiowrite(destpath, audio, sample_rate=16000, norm=False, target_level=-25,
     destdir = os.path.dirname(destpath)
 
     if not os.path.exists(destdir):
-        os.makedirs(destdir)
+        os.makedirs(destdir, exist_ok=True)
 
     sf.write(destpath, audio, sample_rate)
     return

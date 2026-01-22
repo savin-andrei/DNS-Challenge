@@ -11,6 +11,7 @@ import glob
 import argparse
 import ast
 import configparser as CP
+import multiprocessing as mp
 from random import shuffle
 import random
 import csv
@@ -70,6 +71,184 @@ def _match_length(audio, target_len):
         return np.append(audio, pad)
     return audio
 
+
+def _split_counts_even(total, num_parts):
+    if num_parts <= 0:
+        return []
+    base = total // num_parts
+    rem = total % num_parts
+    return [base + (1 if i < rem else 0) for i in range(num_parts)]
+
+
+def _split_counts_weighted(total, weights):
+    if total <= 0 or not weights:
+        return [0] * len(weights)
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return [0] * len(weights)
+    raw = [total * w / total_weight for w in weights]
+    counts = [int(x) for x in raw]
+    remainder = total - sum(counts)
+    if remainder > 0:
+        frac = sorted(
+            ((i, raw[i] - counts[i]) for i in range(len(weights))),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        for i in range(remainder):
+            counts[frac[i][0]] += 1
+    return counts
+
+
+def _split_list_by_counts(items, counts):
+    chunks = []
+    idx = 0
+    for count in counts:
+        if count <= 0:
+            chunks.append([])
+            continue
+        chunks.append(items[idx:idx + count])
+        idx += count
+    return chunks
+
+
+def _split_ranges_from_counts(start, counts):
+    ranges = []
+    cur = start
+    for count in counts:
+        if count <= 0:
+            ranges.append(None)
+            continue
+        end = cur + count - 1
+        ranges.append((cur, end))
+        cur = end + 1
+    return ranges
+
+
+def _merge_csvs(csv_paths, dest_path, header):
+    with open(dest_path, mode='w', newline='') as outfile:
+        writer = csv.writer(outfile)
+        writer.writerow(header)
+        for path in csv_paths:
+            if not path or not os.path.exists(path):
+                continue
+            with open(path, mode='r', newline='') as infile:
+                reader = csv.reader(infile)
+                # Skip header if present
+                first = True
+                for row in reader:
+                    if first and row == header:
+                        first = False
+                        continue
+                    first = False
+                    if row:
+                        writer.writerow(row)
+
+
+def _seed_process(base_seed, process_id):
+    seed = int(base_seed) + int(process_id)
+    np.random.seed(seed)
+    random.seed(seed)
+    return seed
+
+
+def _collect_wavs_from_dir(root_dir):
+    files = []
+    for path in Path(root_dir).rglob('*.wav'):
+        files.append(str(path.resolve()))
+    return files
+
+
+def _collect_clean_from_call_dirs(call_dirs, replicas_subdir):
+    files = []
+    for call_dir in call_dirs:
+        replicas_dir = call_dir / replicas_subdir
+        if not replicas_dir.is_dir():
+            continue
+        for path in sorted(replicas_dir.rglob('*.wav')):
+            files.append(str(path.resolve()))
+    return files
+
+
+def _collect_extra_clean_chunks(params, num_parts):
+    extra_chunks = [[] for _ in range(num_parts)]
+
+    if params['use_singing_data'] == 1:
+        all_singing = _collect_wavs_from_dir(params['clean_singing'])
+        if params['singing_choice'] == 1:
+            mysinging = [s for s in all_singing if ("male" in s and "female" not in s)]
+        elif params['singing_choice'] == 2:
+            mysinging = [s for s in all_singing if "female" in s]
+        else:
+            mysinging = all_singing
+        shuffle(mysinging)
+        singing_counts = _split_counts_even(len(mysinging), num_parts)
+        singing_chunks = _split_list_by_counts(mysinging, singing_counts)
+        for i in range(num_parts):
+            extra_chunks[i].extend(singing_chunks[i])
+
+    if params['use_emotion_data'] == 1:
+        all_emotion = _collect_wavs_from_dir(params['clean_emotion'])
+        shuffle(all_emotion)
+        emotion_counts = _split_counts_even(len(all_emotion), num_parts)
+        emotion_chunks = _split_list_by_counts(all_emotion, emotion_counts)
+        for i in range(num_parts):
+            extra_chunks[i].extend(emotion_chunks[i])
+    else:
+        print('NOT using emotion data for training!')
+
+    if params['use_mandarin_data'] == 1:
+        all_mandarin = _collect_wavs_from_dir(params['clean_mandarin'])
+        shuffle(all_mandarin)
+        mandarin_counts = _split_counts_even(len(all_mandarin), num_parts)
+        mandarin_chunks = _split_list_by_counts(all_mandarin, mandarin_counts)
+        for i in range(num_parts):
+            extra_chunks[i].extend(mandarin_chunks[i])
+    else:
+        print('NOT using non-english (Mandarin) data for training!')
+
+    return extra_chunks
+
+
+def _split_clean_sources(cfg, params, num_parts):
+    if num_parts <= 0:
+        return []
+
+    clean_chunks = []
+    if 'speech_csv' in cfg.keys() and cfg['speech_csv'] != 'None':
+        cleanfilenames = pd.read_csv(cfg['speech_csv'])
+        cleanfilenames = list(cleanfilenames['filename'])
+        shuffle(cleanfilenames)
+        counts = _split_counts_even(len(cleanfilenames), num_parts)
+        clean_chunks = _split_list_by_counts(cleanfilenames, counts)
+    elif 'speech_dir_root' in cfg.keys() and cfg['speech_dir_root'] != 'None':
+        root_dir = Path(cfg['speech_dir_root'])
+        replicas_subdir = cfg.get('replicas_subdir', 'replicas')
+        call_dirs = []
+        for call_dir in sorted(root_dir.iterdir()):
+            if not call_dir.is_dir():
+                continue
+            replicas_dir = call_dir / replicas_subdir
+            if not replicas_dir.is_dir():
+                continue
+            call_dirs.append(call_dir)
+        shuffle(call_dirs)
+        counts = _split_counts_even(len(call_dirs), num_parts)
+        dir_chunks = _split_list_by_counts(call_dirs, counts)
+        for chunk in dir_chunks:
+            clean_chunks.append(_collect_clean_from_call_dirs(chunk, replicas_subdir))
+    else:
+        clean_dir = params['clean_dir']
+        cleanfilenames = _collect_wavs_from_dir(clean_dir)
+        shuffle(cleanfilenames)
+        counts = _split_counts_even(len(cleanfilenames), num_parts)
+        clean_chunks = _split_list_by_counts(cleanfilenames, counts)
+
+    extra_chunks = _collect_extra_clean_chunks(params, len(clean_chunks))
+    for i in range(len(clean_chunks)):
+        clean_chunks[i].extend(extra_chunks[i])
+
+    return clean_chunks
 
 def build_telephony_noise_mask(params, audio_samples_length):
     """Build telephony noise mask from real telephony noise clips."""
@@ -645,10 +824,15 @@ def main_gen(params):
         noise_source_filenamesonly = [i[:-4].split(os.path.sep)[-1] for i in noise_sf]
         noise_files_joined = hyphen.join(noise_source_filenamesonly)[:MAXFILELEN]
 
+        proc_suffix = ""
+        if params.get('process_id') is not None:
+            proc_suffix = "_p{}".format(params['process_id'])
+
         noisyfilename = clean_files_joined + '_' + noise_files_joined + '_snr' + \
-                        str(snr) + '_tl' + str(target_level) + '_fileid_' + str(file_num) + '.wav'
-        cleanfilename = 'clean_fileid_'+str(file_num)+'.wav'
-        noisefilename = 'noise_fileid_'+str(file_num)+'.wav'
+                        str(snr) + '_tl' + str(target_level) + '_fileid_' + str(file_num) + \
+                        proc_suffix + '.wav'
+        cleanfilename = 'clean_fileid_' + str(file_num) + proc_suffix + '.wav'
+        noisefilename = 'noise_fileid_' + str(file_num) + proc_suffix + '.wav'
 
         is_eval = False
         if params.get('eval_stride', 0):
@@ -738,27 +922,19 @@ def main_gen(params):
            train_rows, eval_rows, perf
 
 
-def main_body():
-    '''Main body of this file'''
-
-    parser = argparse.ArgumentParser()
-
-    # Configurations: read noisyspeech_synthesizer.cfg and gather inputs
-    parser.add_argument('--cfg', default='noisyspeech_synthesizer.cfg',
-                        help='Read noisyspeech_synthesizer.cfg for all the details')
-    parser.add_argument('--cfg_str', type=str, default='noisy_speech')
-    args = parser.parse_args()
-
-    params = dict()
-    params['args'] = args
-    cfgpath = os.path.join(os.path.dirname(__file__), args.cfg)
-    assert os.path.exists(cfgpath), f'No configuration file as [{cfgpath}]'
-
+def _load_cfg_from_path(cfgpath, cfg_str):
     cfg = CP.ConfigParser()
     cfg._interpolation = CP.ExtendedInterpolation()
     cfg.read(cfgpath)
-    params['cfg'] = cfg._sections[args.cfg_str]
-    cfg = params['cfg']
+    if cfg_str not in cfg._sections:
+        raise ValueError('Config section [{}] not found in {}'.format(cfg_str, cfgpath))
+    return cfg._sections[cfg_str]
+
+
+def _init_params(args, cfg):
+    params = dict()
+    params['args'] = args
+    params['cfg'] = cfg
 
     clean_dir = os.path.join(os.path.dirname(__file__), 'datasets/clean')
     if cfg.get('speech_dir', 'None') != 'None':
@@ -766,21 +942,23 @@ def main_body():
     elif cfg.get('speech_dir_root', 'None') != 'None':
         clean_dir = cfg.get('speech_dir_root')
     if not os.path.exists(clean_dir):
-        assert False, ('Clean speech data is required')
+        raise AssertionError('Clean speech data is required')
 
     noise_dir = os.path.join(os.path.dirname(__file__), 'datasets/noise')
+    if cfg.get('noise_dir', 'None') != 'None':
+        noise_dir = cfg.get('noise_dir')
+    if not os.path.exists(noise_dir):
+        raise AssertionError('Noise data is required')
 
-    if cfg['noise_dir'] != 'None':
-        noise_dir = cfg['noise_dir']
-    if not os.path.exists:
-        assert False, ('Noise data is required')
+    params['clean_dir'] = clean_dir
+    params['noise_dir'] = noise_dir
 
     params['fs'] = int(cfg['sampling_rate'])
     params['audioformat'] = cfg['audioformat']
     params['audio_length'] = float(cfg['audio_length'])
     params['silence_length'] = float(cfg['silence_length'])
     params['total_hours'] = float(cfg['total_hours'])
-    
+
     # clean singing speech
     params['use_singing_data'] = int(cfg['use_singing_data'])
     params['clean_singing'] = str(cfg['clean_singing'])
@@ -789,11 +967,11 @@ def main_body():
     # clean emotional speech
     params['use_emotion_data'] = int(cfg['use_emotion_data'])
     params['clean_emotion'] = str(cfg['clean_emotion'])
-    
+
     # clean mandarin speech
     params['use_mandarin_data'] = int(cfg['use_mandarin_data'])
     params['clean_mandarin'] = str(cfg['clean_mandarin'])
-    
+
     # rir
     params['use_rir'] = utils.str2bool(cfg.get('use_rir', 'True'))
     params['rir_choice'] = int(cfg['rir_choice'])
@@ -805,7 +983,7 @@ def main_body():
                                      os.path.join('datasets', 'impulse_responses'))
 
     if cfg['fileindex_start'] != 'None' and cfg['fileindex_end'] != 'None':
-        params['num_files'] = int(cfg['fileindex_end'])-int(cfg['fileindex_start'])
+        params['num_files'] = int(cfg['fileindex_end']) - int(cfg['fileindex_start'])
         params['fileindex_start'] = int(cfg['fileindex_start'])
         params['fileindex_end'] = int(cfg['fileindex_end'])
     else:
@@ -813,18 +991,16 @@ def main_body():
         params['fileindex_start'] = 0
         params['fileindex_end'] = params['num_files']
 
-    print('Number of files to be synthesized:', params['num_files'])
-    
     params['is_test_set'] = utils.str2bool(cfg['is_test_set'])
     params['clean_activity_threshold'] = float(cfg['clean_activity_threshold'])
     params['noise_activity_threshold'] = float(cfg['noise_activity_threshold'])
     params['snr_lower'] = int(cfg['snr_lower'])
     params['snr_upper'] = int(cfg['snr_upper'])
-    
+
     params['randomize_snr'] = utils.str2bool(cfg['randomize_snr'])
     params['target_level_lower'] = int(cfg['target_level_lower'])
     params['target_level_upper'] = int(cfg['target_level_upper'])
-    
+
     if 'snr' in cfg.keys():
         params['snr'] = int(cfg['snr'])
     else:
@@ -894,9 +1070,28 @@ def main_body():
         shuffle(telephony_noise_files)
         params['telephony_noise_files'] = telephony_noise_files
 
+    params['num_processes'] = int(cfg.get('num_processes', 1))
+    params['random_seed'] = int(cfg.get('random_seed', 5))
+    params['process_id'] = None
+
+    default_log_dir = os.path.join(os.path.dirname(__file__), 'Logs')
+    params['log_dir'] = cfg.get('log_dir', default_log_dir)
+    params['train_csv'] = cfg.get('train_csv', os.path.join(params['log_dir'], 'train_metadata.csv'))
+    params['eval_csv'] = cfg.get('eval_csv', os.path.join(params['log_dir'], 'eval_metadata.csv'))
+
+    return params
+
+
+def _load_clean_list(params, cfg, clean_override=None):
+    if clean_override is not None:
+        all_cleanfiles = list(clean_override)
+        params['cleanfilenames'] = all_cleanfiles
+        params['num_cleanfiles'] = len(all_cleanfiles)
+        return
+
     if 'speech_csv' in cfg.keys() and cfg['speech_csv'] != 'None':
         cleanfilenames = pd.read_csv(cfg['speech_csv'])
-        cleanfilenames = cleanfilenames['filename']
+        cleanfilenames = list(cleanfilenames['filename'])
     elif 'speech_dir_root' in cfg.keys() and cfg['speech_dir_root'] != 'None':
         root_dir = Path(cfg['speech_dir_root'])
         replicas_subdir = cfg.get('replicas_subdir', 'replicas')
@@ -910,151 +1105,90 @@ def main_body():
             for path in sorted(replicas_dir.rglob('*.wav')):
                 cleanfilenames.append(str(path.resolve()))
     else:
-        #cleanfilenames = glob.glob(os.path.join(clean_dir, params['audioformat']))
-        cleanfilenames= []
-        for path in Path(clean_dir).rglob('*.wav'):
-            cleanfilenames.append(str(path.resolve()))
+        cleanfilenames = _collect_wavs_from_dir(params['clean_dir'])
 
     shuffle(cleanfilenames)
-#   add singing voice to clean speech
-    if params['use_singing_data'] ==1:
-        all_singing= []
-        for path in Path(params['clean_singing']).rglob('*.wav'):
-            all_singing.append(str(path.resolve()))
-            
-        if params['singing_choice']==1: # male speakers
-            mysinging = [s for s in all_singing if ("male" in s and "female" not in s)]
-    
-        elif params['singing_choice']==2: # female speakers
-            mysinging = [s for s in all_singing if "female" in s]
-    
-        elif params['singing_choice']==3: # both male and female
-            mysinging = all_singing
-        else: # default both male and female
-            mysinging = all_singing
-            
-        shuffle(mysinging)
-        if mysinging is not None:
-            all_cleanfiles= cleanfilenames + mysinging
-    else: 
-        all_cleanfiles= cleanfilenames
-        
-#   add emotion data to clean speech
-    if params['use_emotion_data'] ==1:
-        all_emotion= []
-        for path in Path(params['clean_emotion']).rglob('*.wav'):
-            all_emotion.append(str(path.resolve()))
+    all_cleanfiles = cleanfilenames
 
-        shuffle(all_emotion)
-        if all_emotion is not None:
-            all_cleanfiles = all_cleanfiles + all_emotion
-    else: 
-        print('NOT using emotion data for training!')    
-        
-#   add mandarin data to clean speech
-    if params['use_mandarin_data'] ==1:
-        all_mandarin= []
-        for path in Path(params['clean_mandarin']).rglob('*.wav'):
-            all_mandarin.append(str(path.resolve()))
-
-        shuffle(all_mandarin)
-        if all_mandarin is not None:
-            all_cleanfiles = all_cleanfiles + all_mandarin
-    else: 
-        print('NOT using non-english (Mandarin) data for training!')           
-        
+    extra_chunks = _collect_extra_clean_chunks(params, 1)
+    all_cleanfiles = all_cleanfiles + extra_chunks[0]
 
     params['cleanfilenames'] = all_cleanfiles
     params['num_cleanfiles'] = len(params['cleanfilenames'])
-    # If there are .wav files in noise_dir directory, use those
-    # If not, that implies that the noise files are organized into subdirectories by type,
-    # so get the names of the non-excluded subdirectories
+
+
+def _load_noise_list(params, cfg):
+    noise_dir = params['noise_dir']
     if 'noise_csv' in cfg.keys() and cfg['noise_csv'] != 'None':
         noisefilenames = pd.read_csv(cfg['noise_csv'])
-        noisefilenames = noisefilenames['filename']
+        noisefilenames = list(noisefilenames['filename'])
     else:
         noisefilenames = glob.glob(os.path.join(noise_dir, params['audioformat']))
 
-    if len(noisefilenames)!=0:
+    if len(noisefilenames) != 0:
         shuffle(noisefilenames)
         params['noisefilenames'] = noisefilenames
+        if 'noisedirs' in params:
+            del params['noisedirs']
     else:
         noisedirs = glob.glob(os.path.join(noise_dir, '*'))
-        if cfg['noise_types_excluded'] != 'None':
+        if cfg.get('noise_types_excluded', 'None') != 'None':
             dirstoexclude = cfg['noise_types_excluded'].split(',')
             for dirs in dirstoexclude:
-                noisedirs.remove(dirs)
+                if dirs in noisedirs:
+                    noisedirs.remove(dirs)
         shuffle(noisedirs)
         params['noisedirs'] = noisedirs
+        if 'noisefilenames' in params:
+            del params['noisefilenames']
 
+
+def _load_rir_lists(params):
     if params['use_rir']:
         temp = pd.read_csv(params['rir_table_csv'], skiprows=[1], sep=',', header=None,
-                           names=['wavfile','channel','T60_WB','C50_WB','isRealRIR'])
-        temp.keys()
-
-        rir_wav = temp['wavfile'][1:] # 115413
+                           names=['wavfile', 'channel', 'T60_WB', 'C50_WB', 'isRealRIR'])
+        rir_wav = temp['wavfile'][1:]
         rir_channel = temp['channel'][1:]
         rir_t60 = temp['T60_WB'][1:]
-        rir_isreal= temp['isRealRIR'][1:]
+        rir_isreal = temp['isRealRIR'][1:]
 
         rir_wav2 = [w.replace('\\', '/') for w in rir_wav]
         rir_channel2 = [w for w in rir_channel]
         rir_t60_2 = [w for w in rir_t60]
-        rir_isreal2= [w for w in rir_isreal]
+        rir_isreal2 = [w for w in rir_isreal]
 
-        myrir =[]
-        mychannel=[]
-        myt60=[]
+        myrir = []
+        mychannel = []
+        myt60 = []
 
-        lower_t60=  params['lower_t60']
-        upper_t60=  params['upper_t60']
+        lower_t60 = params['lower_t60']
+        upper_t60 = params['upper_t60']
 
-        if params['rir_choice']==1: # real 3076 IRs
-            real_indices= [i for i, x in enumerate(rir_isreal2) if x == "1"]
-
+        if params['rir_choice'] == 1:
+            real_indices = [i for i, x in enumerate(rir_isreal2) if x == "1"]
             chosen_i = []
             for i in real_indices:
                 if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
                     chosen_i.append(i)
-
-            myrir= [rir_wav2[i] for i in chosen_i]
+            myrir = [rir_wav2[i] for i in chosen_i]
             mychannel = [rir_channel2[i] for i in chosen_i]
             myt60 = [rir_t60_2[i] for i in chosen_i]
-
-
-        elif params['rir_choice']==2: # synthetic 112337 IRs
-            synthetic_indices= [i for i, x in enumerate(rir_isreal2) if x == "0"]
-
+        elif params['rir_choice'] == 2:
+            synthetic_indices = [i for i, x in enumerate(rir_isreal2) if x == "0"]
             chosen_i = []
             for i in synthetic_indices:
                 if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
                     chosen_i.append(i)
-
-            myrir= [rir_wav2[i] for i in chosen_i]
+            myrir = [rir_wav2[i] for i in chosen_i]
             mychannel = [rir_channel2[i] for i in chosen_i]
             myt60 = [rir_t60_2[i] for i in chosen_i]
-
-        elif params['rir_choice']==3: # both real and synthetic
-            all_indices= [i for i, x in enumerate(rir_isreal2)]
-
+        else:
+            all_indices = [i for i, x in enumerate(rir_isreal2)]
             chosen_i = []
             for i in all_indices:
                 if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
                     chosen_i.append(i)
-
-            myrir= [rir_wav2[i] for i in chosen_i]
-            mychannel = [rir_channel2[i] for i in chosen_i]
-            myt60 = [rir_t60_2[i] for i in chosen_i]
-
-        else:  # default both real and synthetic
-            all_indices= [i for i, x in enumerate(rir_isreal2)]
-
-            chosen_i = []
-            for i in all_indices:
-                if (float(rir_t60_2[i]) >= lower_t60) and (float(rir_t60_2[i]) <= upper_t60):
-                    chosen_i.append(i)
-
-            myrir= [rir_wav2[i] for i in chosen_i]
+            myrir = [rir_wav2[i] for i in chosen_i]
             mychannel = [rir_channel2[i] for i in chosen_i]
             myt60 = [rir_t60_2[i] for i in chosen_i]
 
@@ -1066,26 +1200,29 @@ def main_body():
         params['mychannel'] = []
         params['myt60'] = []
 
-    # Call main_gen() to generate audio
+
+def _run_generation(params):
     clean_source_files, clean_clipped_files, clean_low_activity_files, \
     noise_source_files, noise_clipped_files, noise_low_activity_files, \
     train_rows, eval_rows, perf = main_gen(params)
 
-    # Create log directory if needed, and write log files of clipped and low activity files
-    log_dir = utils.get_dir(cfg, 'log_dir', 'Logs')
+    log_dir = params.get('log_dir')
+    if not log_dir:
+        log_dir = utils.get_dir(params['cfg'], 'log_dir', 'Logs')
+    else:
+        os.makedirs(log_dir, exist_ok=True)
 
     utils.write_log_file(log_dir, 'source_files.csv', clean_source_files + noise_source_files)
     utils.write_log_file(log_dir, 'clipped_files.csv', clean_clipped_files + noise_clipped_files)
     utils.write_log_file(log_dir, 'low_activity_files.csv', \
                          clean_low_activity_files + noise_low_activity_files)
 
-    # Compute and print stats about percentange of clipped and low activity files
     total_clean = len(clean_source_files) + len(clean_clipped_files) + len(clean_low_activity_files)
     total_noise = len(noise_source_files) + len(noise_clipped_files) + len(noise_low_activity_files)
-    pct_clean_clipped = round(len(clean_clipped_files)/total_clean*100, 1)
-    pct_noise_clipped = round(len(noise_clipped_files)/total_noise*100, 1)
-    pct_clean_low_activity = round(len(clean_low_activity_files)/total_clean*100, 1)
-    pct_noise_low_activity = round(len(noise_low_activity_files)/total_noise*100, 1)
+    pct_clean_clipped = round(len(clean_clipped_files)/total_clean*100, 1) if total_clean else 0.0
+    pct_noise_clipped = round(len(noise_clipped_files)/total_noise*100, 1) if total_noise else 0.0
+    pct_clean_low_activity = round(len(clean_low_activity_files)/total_clean*100, 1) if total_clean else 0.0
+    pct_noise_low_activity = round(len(noise_low_activity_files)/total_noise*100, 1) if total_noise else 0.0
 
     print("Of the " + str(total_clean) + " clean speech files analyzed, " + \
           str(pct_clean_clipped) + "% had clipping, and " + str(pct_clean_low_activity) + \
@@ -1094,6 +1231,7 @@ def main_body():
     print("Of the " + str(total_noise) + " noise files analyzed, " + str(pct_noise_clipped) + \
           "% had clipping, and " + str(pct_noise_low_activity) + "% had low activity " + \
           "(below " + str(params['noise_activity_threshold']*100) + "% active percentage)")
+
     if perf["files"] > 0 and not params.get('perf_trace', False):
         perf_detail = params.get("perf_detail", {})
         avg = {k: perf[k] / perf["files"] for k in perf if k.endswith("_s")}
@@ -1146,18 +1284,143 @@ def main_body():
             )
         )
 
-    train_csv = cfg.get('train_csv', os.path.join(log_dir, 'train_metadata.csv'))
+    train_csv = params.get('train_csv', os.path.join(log_dir, 'train_metadata.csv'))
+    train_dir = os.path.dirname(train_csv)
+    if train_dir:
+        os.makedirs(train_dir, exist_ok=True)
     with open(train_csv, mode='w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(['clean_path', 'noise_path', 'noisy_path'])
         writer.writerows(train_rows)
 
     if params.get('eval_stride', 0) > 0:
-        eval_csv = cfg.get('eval_csv', os.path.join(log_dir, 'eval_metadata.csv'))
+        eval_csv = params.get('eval_csv', os.path.join(log_dir, 'eval_metadata.csv'))
+        eval_dir = os.path.dirname(eval_csv)
+        if eval_dir:
+            os.makedirs(eval_dir, exist_ok=True)
         with open(eval_csv, mode='w', newline='') as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(['clean_path', 'noise_path', 'noisy_path'])
             writer.writerows(eval_rows)
+
+
+def _worker_entry(cfgpath, cfg_str, clean_files, fileindex_start, fileindex_end,
+                  process_id, log_dir, train_csv, eval_csv, base_seed):
+    cfg = _load_cfg_from_path(cfgpath, cfg_str)
+    _seed_process(base_seed, process_id)
+    args = argparse.Namespace(cfg=cfgpath, cfg_str=cfg_str)
+    params = _init_params(args, cfg)
+
+    params['process_id'] = process_id
+    params['fileindex_start'] = int(fileindex_start)
+    params['fileindex_end'] = int(fileindex_end)
+    params['num_files'] = int(fileindex_end) - int(fileindex_start)
+    params['log_dir'] = log_dir
+    params['train_csv'] = train_csv
+    params['eval_csv'] = eval_csv
+
+    _load_clean_list(params, cfg, clean_override=clean_files)
+    _load_noise_list(params, cfg)
+    _load_rir_lists(params)
+    _run_generation(params)
+
+
+def _run_multiprocess(args, cfgpath, cfg, params):
+    num_processes = params['num_processes']
+    if num_processes <= 1:
+        return
+
+    clean_chunks = _split_clean_sources(cfg, params, num_processes)
+    clean_chunks = [chunk for chunk in clean_chunks if chunk]
+    if not clean_chunks:
+        raise ValueError('No clean files found for multiprocessing')
+
+    if len(clean_chunks) < num_processes:
+        print('Reducing processes from {} to {} due to clean data size'.format(
+            num_processes, len(clean_chunks)
+        ))
+
+    total_files = params['fileindex_end'] - params['fileindex_start'] + 1
+    weights = [len(chunk) for chunk in clean_chunks]
+    counts = _split_counts_weighted(total_files, weights)
+    ranges = _split_ranges_from_counts(params['fileindex_start'], counts)
+
+    tasks = []
+    for chunk, count, file_range in zip(clean_chunks, counts, ranges):
+        if count <= 0 or not file_range:
+            continue
+        tasks.append((chunk, file_range))
+
+    if not tasks:
+        raise ValueError('No tasks created for multiprocessing')
+
+    base_log_dir = params.get('log_dir') or os.path.join(os.path.dirname(__file__), 'Logs')
+    os.makedirs(base_log_dir, exist_ok=True)
+    base_train_csv = params.get('train_csv', os.path.join(base_log_dir, 'train_metadata.csv'))
+    base_eval_csv = params.get('eval_csv', os.path.join(base_log_dir, 'eval_metadata.csv'))
+    base_train_dir = os.path.dirname(base_train_csv)
+    if base_train_dir:
+        os.makedirs(base_train_dir, exist_ok=True)
+    base_eval_dir = os.path.dirname(base_eval_csv)
+    if base_eval_dir:
+        os.makedirs(base_eval_dir, exist_ok=True)
+
+    ctx = mp.get_context('spawn')
+    procs = []
+    train_csvs = []
+    eval_csvs = []
+    for pid, task in enumerate(tasks):
+        clean_files, file_range = task
+        fileindex_start, fileindex_end = file_range
+        proc_log_dir = os.path.join(base_log_dir, 'proc_{}'.format(pid))
+        proc_train_csv = os.path.join(proc_log_dir, 'train_metadata.csv')
+        proc_eval_csv = os.path.join(proc_log_dir, 'eval_metadata.csv')
+        train_csvs.append(proc_train_csv)
+        eval_csvs.append(proc_eval_csv)
+        p = ctx.Process(
+            target=_worker_entry,
+            args=(
+                cfgpath, args.cfg_str, clean_files, fileindex_start, fileindex_end,
+                pid, proc_log_dir, proc_train_csv, proc_eval_csv, params['random_seed'],
+            ),
+        )
+        p.start()
+        procs.append(p)
+
+    for p in procs:
+        p.join()
+
+    _merge_csvs(train_csvs, base_train_csv, ['clean_path', 'noise_path', 'noisy_path'])
+    if params.get('eval_stride', 0) > 0:
+        _merge_csvs(eval_csvs, base_eval_csv, ['clean_path', 'noise_path', 'noisy_path'])
+
+
+def main_body():
+    '''Main body of this file'''
+
+    parser = argparse.ArgumentParser()
+
+    # Configurations: read noisyspeech_synthesizer.cfg and gather inputs
+    parser.add_argument('--cfg', default='noisyspeech_synthesizer.cfg',
+                        help='Read noisyspeech_synthesizer.cfg for all the details')
+    parser.add_argument('--cfg_str', type=str, default='noisy_speech')
+    args = parser.parse_args()
+
+    cfgpath = os.path.join(os.path.dirname(__file__), args.cfg)
+    assert os.path.exists(cfgpath), f'No configuration file as [{cfgpath}]'
+    cfg = _load_cfg_from_path(cfgpath, args.cfg_str)
+    params = _init_params(args, cfg)
+
+    print('Number of files to be synthesized:', params['num_files'])
+
+    if params['num_processes'] > 1:
+        _run_multiprocess(args, cfgpath, cfg, params)
+        return
+
+    _load_clean_list(params, cfg)
+    _load_noise_list(params, cfg)
+    _load_rir_lists(params)
+    _run_generation(params)
 
 
 if __name__ == '__main__':
