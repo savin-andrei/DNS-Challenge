@@ -80,9 +80,9 @@ def build_telephony_noise_mask(params, audio_samples_length):
     output_audio = np.zeros(0)
 
     tries_left = MAXTRIES
-    idx = np.random.randint(0, np.size(source_files))
+    idx = np.random.randint(0, len(source_files))
     while remaining_length > 0 and tries_left > 0:
-        idx = (idx + 1) % np.size(source_files)
+        idx = (idx + 1) % len(source_files)
         input_audio, fs_input = audioread(source_files[idx])
         if input_audio is None or len(input_audio) == 0:
             tries_left -= 1
@@ -128,12 +128,12 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
         else:
             noisedirs = params['noisedirs']
             # pick a noise category randomly
-            idx_n_dir = np.random.randint(0, np.size(noisedirs))
+            idx_n_dir = np.random.randint(0, len(noisedirs))
             source_files = glob.glob(os.path.join(noisedirs[idx_n_dir], 
                                                   params['audioformat']))
             shuffle(source_files)
             # pick a noise source file index randomly
-            idx = np.random.randint(0, np.size(source_files))
+            idx = np.random.randint(0, len(source_files))
     source_select_s = time.perf_counter() - t0
 
     # initialize silence
