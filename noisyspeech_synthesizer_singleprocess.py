@@ -26,12 +26,31 @@ import telephony_augment
 import pandas as pd
 from pathlib import Path
 from scipy.io import wavfile
+import torch
+import torchaudio
 
 MAXTRIES = 50
 MAXFILELEN = 100
 
 np.random.seed(5)
 random.seed(5)
+
+_RESAMPLERS = {}
+
+
+def _resample_audio(audio, fs_in, fs_out):
+    if fs_in == fs_out:
+        return audio
+    key = (fs_in, fs_out)
+    if key not in _RESAMPLERS:
+        _RESAMPLERS[key] = torchaudio.transforms.Resample(
+            orig_freq=fs_in, new_freq=fs_out
+        )
+    resampler = _RESAMPLERS[key]
+    audio_tensor = torch.from_numpy(audio).float().unsqueeze(0)
+    with torch.no_grad():
+        out = resampler(audio_tensor).squeeze(0).cpu().numpy()
+    return out
 
 def add_pyreverb(clean_speech, rir):
     
@@ -132,7 +151,7 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
             continue
         if fs_input != fs_output:
             t0 = time.perf_counter()
-            input_audio = librosa.resample(y=input_audio, orig_sr=fs_input, target_sr=fs_output)
+            input_audio = _resample_audio(input_audio, fs_input, fs_output)
             if perf is not None:
                 perf["resample_s"] += time.perf_counter() - t0
 
