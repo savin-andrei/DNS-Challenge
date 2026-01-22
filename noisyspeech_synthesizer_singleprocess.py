@@ -196,7 +196,7 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
         # read next audio file and resample if necessary
 
         t0 = time.perf_counter()
-        idx = (idx + 1) % np.size(source_files)
+        idx = (idx + 1) % len(source_files)
         file_path = source_files[idx]
         select_s = time.perf_counter() - t0
         t0 = time.perf_counter()
