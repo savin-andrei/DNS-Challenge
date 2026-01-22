@@ -114,6 +114,7 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
     # initialize silence
     silence = np.zeros(int(fs_output*silence_length))
 
+    t_build_start = time.perf_counter()
     # iterate through multiple clips until we have a long enough signal
     tries_left = MAXTRIES
     perf = params.get('perf_detail', None)
@@ -172,6 +173,9 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
               " directory to complete the audio build")
         return [], [], clipped_files, idx
 
+    if perf is not None:
+        perf["build_total_s"] += time.perf_counter() - t_build_start
+
     return output_audio, files_used, clipped_files, idx
 
 
@@ -188,7 +192,10 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
     else:
         activity_threshold = params['noise_activity_threshold']
 
+    t_gen_start = time.perf_counter()
+    attempts = 0
     while True:
+        attempts += 1
         audio, source_files, new_clipped_files, index = \
             build_audio(is_clean, params, index, audio_samples_length)
 
@@ -209,6 +216,10 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
         else:
             low_activity_files += source_files
 
+    perf = params.get('perf_detail', None)
+    if perf is not None:
+        perf["gen_total_s"] += time.perf_counter() - t_gen_start
+        perf["gen_attempts"] += attempts
     return audio, source_files, clipped_files, low_activity_files, index
 
 
@@ -245,6 +256,9 @@ def main_gen(params):
         "concat_s": 0.0,
         "silence_s": 0.0,
         "activity_s": 0.0,
+        "build_total_s": 0.0,
+        "gen_total_s": 0.0,
+        "gen_attempts": 0,
     }
     params["perf_detail"] = perf_detail
     perf_interval = params.get('perf_interval', 0)
@@ -446,9 +460,12 @@ def main_gen(params):
             )
             print(
                 "Perf build_audio avg (s/file): read={:.3f} resample={:.3f} crop={:.3f} "
-                "concat={:.3f} silence={:.3f} activity={:.3f}".format(
+                "concat={:.3f} silence={:.3f} activity={:.3f} build_total={:.3f} "
+                "gen_total={:.3f} gen_attempts={:.2f}".format(
                     avg_detail["read_s"], avg_detail["resample_s"], avg_detail["crop_s"],
-                    avg_detail["concat_s"], avg_detail["silence_s"], avg_detail["activity_s"]
+                    avg_detail["concat_s"], avg_detail["silence_s"], avg_detail["activity_s"],
+                    avg_detail["build_total_s"], avg_detail["gen_total_s"],
+                    avg_detail["gen_attempts"]
                 )
             )
 
@@ -825,9 +842,12 @@ def main_body():
         )
         print(
             "Perf build_audio avg (s/file): read={:.3f} resample={:.3f} crop={:.3f} "
-            "concat={:.3f} silence={:.3f} activity={:.3f}".format(
+            "concat={:.3f} silence={:.3f} activity={:.3f} build_total={:.3f} "
+            "gen_total={:.3f} gen_attempts={:.2f}".format(
                 avg_detail["read_s"], avg_detail["resample_s"], avg_detail["crop_s"],
-                avg_detail["concat_s"], avg_detail["silence_s"], avg_detail["activity_s"]
+                avg_detail["concat_s"], avg_detail["silence_s"], avg_detail["activity_s"],
+                avg_detail["build_total_s"], avg_detail["gen_total_s"],
+                avg_detail["gen_attempts"]
             )
         )
 
