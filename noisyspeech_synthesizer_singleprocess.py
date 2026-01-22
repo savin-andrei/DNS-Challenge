@@ -146,13 +146,15 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
         if not perf_trace:
             return
         file_name = os.path.basename(file_path)
+        comp_sum = read_s + resample_s + crop_s + clip_s + concat_s + silence_s
+        other_s = iter_total_s - comp_sum
         print(
-            "Perf build iter: clean={} iter={} event={} file={} read={:.3f} "
-            "resample={:.3f} crop={:.3f} clip={:.3f} concat={:.3f} silence={:.3f} "
-            "iter_total={:.3f} audio_len={} remaining={}".format(
+            "Perf build iter: clean={} iter={} event={} file={} read={:.6f} "
+            "resample={:.6f} crop={:.6f} clip={:.6f} concat={:.6f} silence={:.6f} "
+            "other={:.6f} iter_total={:.6f} audio_len={} remaining={}".format(
                 int(is_clean), iter_idx, event, file_name, read_s, resample_s,
-                crop_s, clip_s, concat_s, silence_s, iter_total_s, audio_len,
-                remaining_len
+                crop_s, clip_s, concat_s, silence_s, other_s, iter_total_s,
+                audio_len, remaining_len
             )
         )
     while remaining_length > 0 and tries_left > 0:
@@ -181,8 +183,8 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
             sys.stderr.write("WARNING: Empty or unreadable audio: %s\n" % file_path)
             _trace_build_iter(
                 "empty", file_path, read_s, resample_s, crop_s, clip_s,
-                concat_s, silence_s, time.perf_counter() - t_iter_start, 0,
-                remaining_length
+                concat_s, silence_s, iter_total_s=time.perf_counter() - t_iter_start, audio_len=0,
+                remaining_len=remaining_length
             )
             continue
         if fs_input != fs_output:
@@ -302,10 +304,12 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
             build_total_s += build_s
             attempt_total_s += attempt_total
             if perf_trace:
+                other_s = attempt_total - (build_s + activity_s)
                 print(
                     "Perf gen attempt: clean={} attempt={} event=short_audio "
-                    "build={:.3f} activity={:.3f} total={:.3f}".format(
-                        int(is_clean), attempts, build_s, activity_s, attempt_total
+                    "build={:.6f} activity={:.6f} other={:.6f} total={:.6f}".format(
+                        int(is_clean), attempts, build_s, activity_s, other_s,
+                        attempt_total
                     )
                 )
             continue
@@ -315,10 +319,12 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
             build_total_s += build_s
             attempt_total_s += attempt_total
             if perf_trace:
+                other_s = attempt_total - (build_s + activity_s)
                 print(
                     "Perf gen attempt: clean={} attempt={} event=skip_activity "
-                    "build={:.3f} activity={:.3f} total={:.3f}".format(
-                        int(is_clean), attempts, build_s, activity_s, attempt_total
+                    "build={:.6f} activity={:.6f} other={:.6f} total={:.6f}".format(
+                        int(is_clean), attempts, build_s, activity_s, other_s,
+                        attempt_total
                     )
                 )
             break
@@ -335,11 +341,13 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
             activity_total_s += activity_s
             attempt_total_s += attempt_total
             if perf_trace:
+                other_s = attempt_total - (build_s + activity_s)
                 print(
                     "Perf gen attempt: clean={} attempt={} event=accepted "
-                    "build={:.3f} activity={:.3f} total={:.3f} percactive={:.3f}".format(
-                        int(is_clean), attempts, build_s, activity_s, attempt_total,
-                        percactive
+                    "build={:.6f} activity={:.6f} other={:.6f} total={:.6f} "
+                    "percactive={:.6f}".format(
+                        int(is_clean), attempts, build_s, activity_s, other_s,
+                        attempt_total, percactive
                     )
                 )
             break
@@ -355,11 +363,13 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
             activity_total_s += activity_s
             attempt_total_s += attempt_total
             if perf_trace:
+                other_s = attempt_total - (build_s + activity_s)
                 print(
                     "Perf gen attempt: clean={} attempt={} event=low_activity "
-                    "build={:.3f} activity={:.3f} total={:.3f} percactive={:.3f}".format(
-                        int(is_clean), attempts, build_s, activity_s, attempt_total,
-                        percactive
+                    "build={:.6f} activity={:.6f} other={:.6f} total={:.6f} "
+                    "percactive={:.6f}".format(
+                        int(is_clean), attempts, build_s, activity_s, other_s,
+                        attempt_total, percactive
                     )
                 )
 
@@ -371,11 +381,12 @@ def gen_audio(is_clean, params, index, audio_samples_length=-1):
         else:
             perf["gen_attempts_noise"] += attempts
     if perf_trace:
+        other_total_s = attempt_total_s - (build_total_s + activity_total_s)
         print(
-            "Perf gen summary: clean={} attempts={} build_total={:.3f} "
-            "activity_total={:.3f} total={:.3f}".format(
+            "Perf gen summary: clean={} attempts={} build_total={:.6f} "
+            "activity_total={:.6f} other_total={:.6f} total={:.6f}".format(
                 int(is_clean), attempts, build_total_s, activity_total_s,
-                attempt_total_s
+                other_total_s, attempt_total_s
             )
         )
     return audio, source_files, clipped_files, low_activity_files, index
