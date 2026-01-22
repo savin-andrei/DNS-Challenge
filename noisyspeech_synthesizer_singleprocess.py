@@ -138,6 +138,7 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
     tries_left = MAXTRIES
     perf = params.get('perf_detail', None)
     while remaining_length > 0 and tries_left > 0:
+        t_attempt_start = time.perf_counter()
 
         # read next audio file and resample if necessary
 
@@ -186,6 +187,10 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
             remaining_length -= silence_len
             if perf is not None:
                 perf["silence_s"] += time.perf_counter() - t0
+
+        if perf is not None:
+            perf["attempt_s"] += time.perf_counter() - t_attempt_start
+            perf["attempts"] += 1
 
     if tries_left == 0 and not is_clean and 'noisedirs' in params.keys():
         print("There are not enough non-clipped files in the " + noisedirs[idx_n_dir] + \
@@ -278,6 +283,8 @@ def main_gen(params):
         "build_total_s": 0.0,
         "gen_total_s": 0.0,
         "gen_attempts": 0,
+        "attempt_s": 0.0,
+        "attempts": 0,
     }
     params["perf_detail"] = perf_detail
     perf_interval = params.get('perf_interval', 0)
@@ -477,14 +484,15 @@ def main_gen(params):
                     avg["write_s"]
                 )
             )
+            attempt_avg = avg_detail["attempt_s"] / max(avg_detail["attempts"], 1)
             print(
                 "Perf build_audio avg (s/file): read={:.3f} resample={:.3f} crop={:.3f} "
                 "concat={:.3f} silence={:.3f} activity={:.3f} build_total={:.3f} "
-                "gen_total={:.3f} gen_attempts={:.2f}".format(
+                "gen_total={:.3f} gen_attempts={:.2f} attempt_avg={:.3f}".format(
                     avg_detail["read_s"], avg_detail["resample_s"], avg_detail["crop_s"],
                     avg_detail["concat_s"], avg_detail["silence_s"], avg_detail["activity_s"],
                     avg_detail["build_total_s"], avg_detail["gen_total_s"],
-                    avg_detail["gen_attempts"]
+                    avg_detail["gen_attempts"], attempt_avg
                 )
             )
 
@@ -859,14 +867,15 @@ def main_body():
                 avg["write_s"]
             )
         )
+        attempt_avg = avg_detail["attempt_s"] / max(avg_detail["attempts"], 1)
         print(
             "Perf build_audio avg (s/file): read={:.3f} resample={:.3f} crop={:.3f} "
             "concat={:.3f} silence={:.3f} activity={:.3f} build_total={:.3f} "
-            "gen_total={:.3f} gen_attempts={:.2f}".format(
+            "gen_total={:.3f} gen_attempts={:.2f} attempt_avg={:.3f}".format(
                 avg_detail["read_s"], avg_detail["resample_s"], avg_detail["crop_s"],
                 avg_detail["concat_s"], avg_detail["silence_s"], avg_detail["activity_s"],
                 avg_detail["build_total_s"], avg_detail["gen_total_s"],
-                avg_detail["gen_attempts"]
+                avg_detail["gen_attempts"], attempt_avg
             )
         )
 
