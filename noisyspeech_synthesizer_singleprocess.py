@@ -112,6 +112,11 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
     files_used = []
     clipped_files = []
 
+    perf = params.get('perf_detail', None)
+    perf_trace = params.get('perf_trace', False)
+    t_setup_start = time.perf_counter()
+
+    t0 = time.perf_counter()
     if is_clean:
         source_files = params['cleanfilenames']
         idx = index
@@ -129,80 +134,108 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
             shuffle(source_files)
             # pick a noise source file index randomly
             idx = np.random.randint(0, np.size(source_files))
+    source_select_s = time.perf_counter() - t0
 
     # initialize silence
+    t0 = time.perf_counter()
     silence = np.zeros(int(fs_output*silence_length))
+    silence_init_s = time.perf_counter() - t0
+    setup_total_s = time.perf_counter() - t_setup_start
+    if perf is not None:
+        perf["source_select_s"] += source_select_s
+        perf["silence_init_s"] += silence_init_s
+        perf["build_setup_s"] += setup_total_s
+    if perf_trace:
+        print(
+            "Perf build setup: clean={} source_select={:.6f} silence_init={:.6f} "
+            "setup_total={:.6f}".format(
+                int(is_clean), source_select_s, silence_init_s, setup_total_s
+            )
+        )
 
     t_build_start = time.perf_counter()
     # iterate through multiple clips until we have a long enough signal
     tries_left = MAXTRIES
-    perf = params.get('perf_detail', None)
-    perf_trace = params.get('perf_trace', False)
     iter_idx = 0
 
-    def _trace_build_iter(event, file_path, read_s, resample_s, crop_s,
-                          clip_s, concat_s, silence_s, iter_total_s,
-                          audio_len, remaining_len):
+    def _trace_build_iter(event, file_path, select_s, read_s, empty_check_s,
+                          resample_s, crop_s, clip_s, concat_s, silence_s,
+                          perf_s, iter_total_s, audio_len, remaining_len):
         if not perf_trace:
             return
         file_name = os.path.basename(file_path)
-        comp_sum = read_s + resample_s + crop_s + clip_s + concat_s + silence_s
-        other_s = iter_total_s - comp_sum
+        comp_sum = (
+            select_s + read_s + empty_check_s + resample_s + crop_s + clip_s +
+            concat_s + silence_s + perf_s
+        )
+        gap_s = iter_total_s - comp_sum
         print(
-            "Perf build iter: clean={} iter={} event={} file={} read={:.6f} "
-            "resample={:.6f} crop={:.6f} clip={:.6f} concat={:.6f} silence={:.6f} "
-            "other={:.6f} iter_total={:.6f} audio_len={} remaining={}".format(
-                int(is_clean), iter_idx, event, file_name, read_s, resample_s,
-                crop_s, clip_s, concat_s, silence_s, other_s, iter_total_s,
-                audio_len, remaining_len
+            "Perf build iter: clean={} iter={} event={} file={} select={:.6f} "
+            "read={:.6f} empty_chk={:.6f} resample={:.6f} crop={:.6f} "
+            "clip={:.6f} concat={:.6f} silence={:.6f} perf={:.6f} "
+            "gap={:.6f} iter_total={:.6f} audio_len={} remaining={}".format(
+                int(is_clean), iter_idx, event, file_name, select_s, read_s,
+                empty_check_s, resample_s, crop_s, clip_s, concat_s, silence_s,
+                perf_s, gap_s, iter_total_s, audio_len, remaining_len
             )
         )
     while remaining_length > 0 and tries_left > 0:
         iter_idx += 1
         t_iter_start = time.perf_counter()
         t_attempt_start = time.perf_counter()
+        select_s = 0.0
         read_s = 0.0
+        empty_check_s = 0.0
         resample_s = 0.0
         crop_s = 0.0
         clip_s = 0.0
         concat_s = 0.0
         silence_s = 0.0
+        perf_s = 0.0
 
         # read next audio file and resample if necessary
 
+        t0 = time.perf_counter()
         idx = (idx + 1) % np.size(source_files)
         file_path = source_files[idx]
+        select_s = time.perf_counter() - t0
         t0 = time.perf_counter()
         input_audio, fs_input = audioread(file_path)
         read_s = time.perf_counter() - t0
         if perf is not None:
             perf["read_s"] += read_s
-        if input_audio is None or len(input_audio) == 0:
+        t0 = time.perf_counter()
+        is_empty = input_audio is None or len(input_audio) == 0
+        empty_check_s = time.perf_counter() - t0
+        if is_empty:
             if perf is not None:
                 perf["read_empty"] += 1
             sys.stderr.write("WARNING: Empty or unreadable audio: %s\n" % file_path)
             _trace_build_iter(
-                "empty", file_path, read_s, resample_s, crop_s, clip_s,
-                concat_s, silence_s, iter_total_s=time.perf_counter() - t_iter_start, audio_len=0,
+                "empty", file_path, select_s, read_s, empty_check_s, resample_s,
+                crop_s, clip_s, concat_s, silence_s, perf_s,
+                iter_total_s=time.perf_counter() - t_iter_start, audio_len=0,
                 remaining_len=remaining_length
             )
             continue
+        t0 = time.perf_counter()
         if fs_input != fs_output:
-            t0 = time.perf_counter()
             input_audio = _resample_audio(input_audio, fs_input, fs_output)
-            resample_s = time.perf_counter() - t0
             if perf is not None:
-                perf["resample_s"] += resample_s
+                perf["resample_s"] += time.perf_counter() - t0
+        resample_s = time.perf_counter() - t0
 
         # if current file is longer than remaining desired length, and this is
         # noise generation or this is training set, subsample it randomly
+        t0 = time.perf_counter()
         if len(input_audio) > remaining_length and (not is_clean or not params['is_test_set']):
-            t0 = time.perf_counter()
             idx_seg = np.random.randint(0, len(input_audio)-remaining_length)
             input_audio = input_audio[idx_seg:idx_seg+remaining_length]
             crop_s = time.perf_counter() - t0
             if perf is not None:
                 perf["crop_s"] += crop_s
+        else:
+            crop_s = time.perf_counter() - t0
 
         # check for clipping, and if found move onto next file
         t0 = time.perf_counter()
@@ -214,9 +247,10 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
             clipped_files.append(file_path)
             tries_left -= 1
             _trace_build_iter(
-                "clipped", file_path, read_s, resample_s, crop_s, clip_s,
-                concat_s, silence_s, time.perf_counter() - t_iter_start,
-                len(input_audio), remaining_length
+                "clipped", file_path, select_s, read_s, empty_check_s, resample_s,
+                crop_s, clip_s, concat_s, silence_s, perf_s,
+                time.perf_counter() - t_iter_start, len(input_audio),
+                remaining_length
             )
             continue
 
@@ -230,21 +264,26 @@ def build_audio(is_clean, params, index, audio_samples_length=-1):
             perf["concat_s"] += concat_s
 
         # add some silence if we have not reached desired audio length
+        t0 = time.perf_counter()
         if remaining_length > 0:
-            t0 = time.perf_counter()
             silence_len = min(remaining_length, len(silence))
             output_audio = np.append(output_audio, silence[:silence_len])
             remaining_length -= silence_len
             silence_s = time.perf_counter() - t0
             if perf is not None:
                 perf["silence_s"] += silence_s
+        else:
+            silence_s = time.perf_counter() - t0
 
+        t0 = time.perf_counter()
         if perf is not None:
             perf["attempt_s"] += time.perf_counter() - t_attempt_start
             perf["attempts"] += 1
+        perf_s = time.perf_counter() - t0
         _trace_build_iter(
-            "ok", file_path, read_s, resample_s, crop_s, clip_s, concat_s,
-            silence_s, time.perf_counter() - t_iter_start, len(input_audio),
+            "ok", file_path, select_s, read_s, empty_check_s, resample_s,
+            crop_s, clip_s, concat_s, silence_s, perf_s,
+            time.perf_counter() - t_iter_start, len(input_audio),
             remaining_length
         )
 
@@ -434,6 +473,9 @@ def main_gen(params):
         "gen_attempts_noise": 0,
         "attempt_s": 0.0,
         "attempts": 0,
+        "source_select_s": 0.0,
+        "silence_init_s": 0.0,
+        "build_setup_s": 0.0,
         "read_empty": 0,
         "clipped": 0,
         "short_clean": 0,
