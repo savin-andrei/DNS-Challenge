@@ -38,6 +38,28 @@ random.seed(5)
 
 _RESAMPLERS = {}
 
+def _parse_skip_substrings(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value if str(v)]
+    text = str(value).strip()
+    if not text or text.lower() == 'none':
+        return []
+    return [s.strip() for s in text.split(',') if s.strip()]
+
+
+def _filter_paths_by_substrings(paths, substrings):
+    if not substrings:
+        return list(paths)
+    filtered = []
+    for path in paths:
+        name = os.path.basename(str(path))
+        if any(sub in name for sub in substrings):
+            continue
+        filtered.append(str(path))
+    return filtered
+
 
 def _resample_audio(audio, fs_in, fs_out):
     if fs_in == fs_out:
@@ -152,14 +174,14 @@ def _seed_process(base_seed, process_id):
     return seed
 
 
-def _collect_wavs_from_dir(root_dir):
+def _collect_wavs_from_dir(root_dir, skip_substrings=None):
     files = []
     for path in Path(root_dir).rglob('*.wav'):
         files.append(str(path.resolve()))
-    return files
+    return _filter_paths_by_substrings(files, skip_substrings)
 
 
-def _collect_clean_from_call_dirs(call_dirs, replicas_subdir):
+def _collect_clean_from_call_dirs(call_dirs, replicas_subdir, skip_substrings=None):
     files = []
     for call_dir in call_dirs:
         replicas_dir = call_dir / replicas_subdir
@@ -167,14 +189,15 @@ def _collect_clean_from_call_dirs(call_dirs, replicas_subdir):
             continue
         for path in sorted(replicas_dir.rglob('*.wav')):
             files.append(str(path.resolve()))
-    return files
+    return _filter_paths_by_substrings(files, skip_substrings)
 
 
 def _collect_extra_clean_chunks(params, num_parts):
     extra_chunks = [[] for _ in range(num_parts)]
+    skip_substrings = params.get('skip_file_substrings', [])
 
     if params['use_singing_data'] == 1:
-        all_singing = _collect_wavs_from_dir(params['clean_singing'])
+        all_singing = _collect_wavs_from_dir(params['clean_singing'], skip_substrings)
         if params['singing_choice'] == 1:
             mysinging = [s for s in all_singing if ("male" in s and "female" not in s)]
         elif params['singing_choice'] == 2:
@@ -188,7 +211,7 @@ def _collect_extra_clean_chunks(params, num_parts):
             extra_chunks[i].extend(singing_chunks[i])
 
     if params['use_emotion_data'] == 1:
-        all_emotion = _collect_wavs_from_dir(params['clean_emotion'])
+        all_emotion = _collect_wavs_from_dir(params['clean_emotion'], skip_substrings)
         shuffle(all_emotion)
         emotion_counts = _split_counts_even(len(all_emotion), num_parts)
         emotion_chunks = _split_list_by_counts(all_emotion, emotion_counts)
@@ -198,7 +221,7 @@ def _collect_extra_clean_chunks(params, num_parts):
         print('NOT using emotion data for training!')
 
     if params['use_mandarin_data'] == 1:
-        all_mandarin = _collect_wavs_from_dir(params['clean_mandarin'])
+        all_mandarin = _collect_wavs_from_dir(params['clean_mandarin'], skip_substrings)
         shuffle(all_mandarin)
         mandarin_counts = _split_counts_even(len(all_mandarin), num_parts)
         mandarin_chunks = _split_list_by_counts(all_mandarin, mandarin_counts)
@@ -215,9 +238,11 @@ def _split_clean_sources(cfg, params, num_parts):
         return []
 
     clean_chunks = []
+    skip_substrings = params.get('skip_file_substrings', [])
     if 'speech_csv' in cfg.keys() and cfg['speech_csv'] != 'None':
         cleanfilenames = pd.read_csv(cfg['speech_csv'])
         cleanfilenames = list(cleanfilenames['filename'])
+        cleanfilenames = _filter_paths_by_substrings(cleanfilenames, skip_substrings)
         shuffle(cleanfilenames)
         counts = _split_counts_even(len(cleanfilenames), num_parts)
         clean_chunks = _split_list_by_counts(cleanfilenames, counts)
@@ -236,10 +261,12 @@ def _split_clean_sources(cfg, params, num_parts):
         counts = _split_counts_even(len(call_dirs), num_parts)
         dir_chunks = _split_list_by_counts(call_dirs, counts)
         for chunk in dir_chunks:
-            clean_chunks.append(_collect_clean_from_call_dirs(chunk, replicas_subdir))
+            clean_chunks.append(_collect_clean_from_call_dirs(
+                chunk, replicas_subdir, skip_substrings
+            ))
     else:
         clean_dir = params['clean_dir']
-        cleanfilenames = _collect_wavs_from_dir(clean_dir)
+        cleanfilenames = _collect_wavs_from_dir(clean_dir, skip_substrings)
         shuffle(cleanfilenames)
         counts = _split_counts_even(len(cleanfilenames), num_parts)
         clean_chunks = _split_list_by_counts(cleanfilenames, counts)
@@ -1017,6 +1044,10 @@ def _init_params(args, cfg):
         params['eval_clean_proc_dir'] = utils.get_dir(cfg, 'eval_clean_destination', 'eval_clean')
         params['eval_noise_proc_dir'] = utils.get_dir(cfg, 'eval_noise_destination', 'eval_noise')
 
+    params['skip_file_substrings'] = _parse_skip_substrings(
+        cfg.get('skip_file_substrings', 'None')
+    )
+
     def _cfg_bool(key, default=False):
         if key not in cfg:
             return default
@@ -1083,8 +1114,9 @@ def _init_params(args, cfg):
 
 
 def _load_clean_list(params, cfg, clean_override=None):
+    skip_substrings = params.get('skip_file_substrings', [])
     if clean_override is not None:
-        all_cleanfiles = list(clean_override)
+        all_cleanfiles = _filter_paths_by_substrings(clean_override, skip_substrings)
         params['cleanfilenames'] = all_cleanfiles
         params['num_cleanfiles'] = len(all_cleanfiles)
         return
@@ -1092,6 +1124,7 @@ def _load_clean_list(params, cfg, clean_override=None):
     if 'speech_csv' in cfg.keys() and cfg['speech_csv'] != 'None':
         cleanfilenames = pd.read_csv(cfg['speech_csv'])
         cleanfilenames = list(cleanfilenames['filename'])
+        cleanfilenames = _filter_paths_by_substrings(cleanfilenames, skip_substrings)
     elif 'speech_dir_root' in cfg.keys() and cfg['speech_dir_root'] != 'None':
         root_dir = Path(cfg['speech_dir_root'])
         replicas_subdir = cfg.get('replicas_subdir', 'replicas')
@@ -1104,8 +1137,9 @@ def _load_clean_list(params, cfg, clean_override=None):
                 continue
             for path in sorted(replicas_dir.rglob('*.wav')):
                 cleanfilenames.append(str(path.resolve()))
+        cleanfilenames = _filter_paths_by_substrings(cleanfilenames, skip_substrings)
     else:
-        cleanfilenames = _collect_wavs_from_dir(params['clean_dir'])
+        cleanfilenames = _collect_wavs_from_dir(params['clean_dir'], skip_substrings)
 
     shuffle(cleanfilenames)
     all_cleanfiles = cleanfilenames
