@@ -85,6 +85,88 @@ def add_pyreverb(clean_speech, rir):
     return reverb_speech
 
 
+def _clamp(value, low, high):
+    return max(low, min(high, value))
+
+
+def _ordered_pair(vmin, vmax):
+    return (vmin, vmax) if vmin <= vmax else (vmax, vmin)
+
+
+def _presence_boost(audio, fs, low_hz, high_hz, boost_db):
+    if fs <= 0:
+        return audio
+    nyq = fs / 2.0
+    low = _clamp(float(low_hz), 50.0, nyq * 0.95)
+    high = _clamp(float(high_hz), 60.0, nyq * 0.98)
+    if high <= low + 20.0:
+        return audio
+
+    try:
+        b, a = signal.butter(2, [low / nyq, high / nyq], btype='band')
+    except ValueError:
+        return audio
+
+    band = signal.lfilter(b, a, audio)
+    # Add emphasized upper-band content to simulate stronger vocal effort.
+    band_gain = max(0.0, 10 ** (boost_db / 20.0) - 1.0)
+    return audio + band * band_gain
+
+
+def apply_yelling_augmentation(audio, fs, yelling_cfg, rng=random):
+    """Apply a lightweight pseudo-yelling transform to clean speech."""
+    if audio is None or len(audio) == 0:
+        return audio, False
+    if not yelling_cfg.get('enable', False):
+        return audio, False
+
+    prob = _clamp(float(yelling_cfg.get('prob', 0.0)), 0.0, 1.0)
+    if rng.random() >= prob:
+        return audio, False
+
+    eps = np.finfo(np.float32).eps
+    out = np.array(audio, dtype=np.float32, copy=True)
+
+    gain_db = rng.uniform(yelling_cfg['gain_db_min'], yelling_cfg['gain_db_max'])
+    out = out * (10 ** (gain_db / 20.0))
+
+    comp_power = _clamp(
+        rng.uniform(yelling_cfg['compress_power_min'], yelling_cfg['compress_power_max']),
+        0.05,
+        1.0,
+    )
+    out = np.sign(out) * (np.abs(out) ** comp_power)
+
+    presence_boost_db = rng.uniform(
+        yelling_cfg['presence_boost_db_min'], yelling_cfg['presence_boost_db_max']
+    )
+    out = _presence_boost(
+        out,
+        fs,
+        yelling_cfg['presence_low_hz'],
+        yelling_cfg['presence_high_hz'],
+        presence_boost_db,
+    )
+
+    drive = max(1.0, rng.uniform(yelling_cfg['drive_min'], yelling_cfg['drive_max']))
+    out = np.tanh(drive * out) / np.tanh(drive)
+
+    hard_clip_prob = _clamp(float(yelling_cfg.get('hard_clip_prob', 0.0)), 0.0, 1.0)
+    if hard_clip_prob > 0.0 and rng.random() < hard_clip_prob:
+        clip_thr = rng.uniform(
+            yelling_cfg['hard_clip_threshold_min'],
+            yelling_cfg['hard_clip_threshold_max'],
+        )
+        clip_thr = _clamp(float(clip_thr), 0.2, 0.99)
+        out = np.clip(out, -clip_thr, clip_thr)
+
+    max_amp = np.max(np.abs(out))
+    if max_amp > 0.99:
+        out = out * (0.99 / (max_amp + eps))
+
+    return out, True
+
+
 def _match_length(audio, target_len):
     if len(audio) > target_len:
         return audio[:target_len]
@@ -705,6 +787,11 @@ def main_gen(params):
             gen_audio(True, params, clean_index)
         perf["clean_gen_s"] += time.perf_counter() - t0
 
+        if params.get('yelling_aug', {}).get('enable', False):
+            clean, _ = apply_yelling_augmentation(
+                clean, params['fs'], params['yelling_aug'], rng=random
+            )
+
         if params.get('use_rir', True) and params.get('myrir'):
             t0 = time.perf_counter()
             # add reverb with selected RIR
@@ -1062,6 +1149,51 @@ def _init_params(args, cfg):
         if key not in cfg:
             return default
         return int(cfg[key])
+
+    gain_db_min, gain_db_max = _ordered_pair(
+        _cfg_float('yelling_gain_db_min', 3.0),
+        _cfg_float('yelling_gain_db_max', 10.0),
+    )
+    comp_power_min, comp_power_max = _ordered_pair(
+        _cfg_float('yelling_compress_power_min', 0.55),
+        _cfg_float('yelling_compress_power_max', 0.85),
+    )
+    drive_min, drive_max = _ordered_pair(
+        _cfg_float('yelling_drive_min', 1.5),
+        _cfg_float('yelling_drive_max', 3.5),
+    )
+    presence_boost_db_min, presence_boost_db_max = _ordered_pair(
+        _cfg_float('yelling_presence_boost_db_min', 2.0),
+        _cfg_float('yelling_presence_boost_db_max', 8.0),
+    )
+    clip_thr_min, clip_thr_max = _ordered_pair(
+        _cfg_float('yelling_hard_clip_threshold_min', 0.75),
+        _cfg_float('yelling_hard_clip_threshold_max', 0.92),
+    )
+
+    params['yelling_aug'] = {
+        'enable': _cfg_bool('use_yelling_aug', False),
+        'prob': _cfg_float('yelling_apply_prob', 0.0),
+        'gain_db_min': gain_db_min,
+        'gain_db_max': gain_db_max,
+        'compress_power_min': comp_power_min,
+        'compress_power_max': comp_power_max,
+        'drive_min': drive_min,
+        'drive_max': drive_max,
+        'presence_boost_db_min': presence_boost_db_min,
+        'presence_boost_db_max': presence_boost_db_max,
+        'presence_low_hz': _cfg_float('yelling_presence_low_hz', 1200.0),
+        'presence_high_hz': _cfg_float(
+            'yelling_presence_high_hz', min(params['fs'] / 2.0 * 0.95, 3500.0)
+        ),
+        'hard_clip_prob': _cfg_float('yelling_hard_clip_prob', 0.2),
+        'hard_clip_threshold_min': clip_thr_min,
+        'hard_clip_threshold_max': clip_thr_max,
+    }
+    params['yelling_aug']['prob'] = _clamp(params['yelling_aug']['prob'], 0.0, 1.0)
+    params['yelling_aug']['hard_clip_prob'] = _clamp(
+        params['yelling_aug']['hard_clip_prob'], 0.0, 1.0
+    )
 
     params['telephony'] = {
         'enable': _cfg_bool('telephony_enable', False),
