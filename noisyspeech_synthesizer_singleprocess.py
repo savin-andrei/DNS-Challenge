@@ -739,6 +739,8 @@ def main_gen(params):
         "clean_gen_s": 0.0,
         "noise_gen_s": 0.0,
         "rir_s": 0.0,
+        "rir_applied": 0,
+        "rir_resampled": 0,
         "telephony_clean_s": 0.0,
         "telephony_noise_s": 0.0,
         "telephony_post_s": 0.0,
@@ -777,6 +779,8 @@ def main_gen(params):
     params["perf_detail"] = perf_detail
     perf_interval = params.get('perf_interval', 0)
     perf_trace = params.get('perf_trace', False)
+    rir_log_examples_left = max(0, int(params.get('rir_log_examples', 3)))
+    rir_log_interval = max(0, int(params.get('rir_log_interval', 0)))
     if perf_trace:
         perf_interval = 0
 
@@ -820,11 +824,32 @@ def main_gen(params):
                 #print(my_channel)
 
             samples_rir_ch = np.asarray(samples_rir_ch, dtype=np.float32)
+            rir_resampled = fs_rir != params['fs']
             if fs_rir != params['fs']:
                 samples_rir_ch = _resample_audio(samples_rir_ch, fs_rir, params['fs'])
 
             clean = add_pyreverb(clean, samples_rir_ch)
             perf["rir_s"] += time.perf_counter() - t0
+            perf["rir_applied"] += 1
+            if rir_resampled:
+                perf["rir_resampled"] += 1
+
+            should_log_rir = (
+                perf_trace
+                or rir_log_examples_left > 0
+                or (rir_log_interval > 0 and perf["rir_applied"] % rir_log_interval == 0)
+            )
+            if should_log_rir:
+                rir_log_name = my_rir if perf_trace else os.path.basename(my_rir)
+                print(
+                    "RIR applied: fileid={} rir={} channel={} fs_rir={} fs_target={} "
+                    "resampled={}".format(
+                        file_num, rir_log_name, my_channel, fs_rir, params['fs'],
+                        int(rir_resampled)
+                    )
+                )
+            if rir_log_examples_left > 0:
+                rir_log_examples_left -= 1
         clean_target_len = len(clean)
         if params.get('telephony') and params['telephony'].get('enable') \
            and params['telephony'].get('apply_to_clean', True):
@@ -1129,6 +1154,8 @@ def _init_params(args, cfg):
     params['noise_proc_dir'] = utils.get_dir(cfg, 'noise_destination', 'noise')
     params['perf_interval'] = int(cfg.get('perf_interval', 0))
     params['perf_trace'] = utils.str2bool(cfg.get('perf_trace', 'False'))
+    params['rir_log_examples'] = int(cfg.get('rir_log_examples', 3))
+    params['rir_log_interval'] = int(cfg.get('rir_log_interval', 0))
     params['eval_stride'] = int(cfg.get('eval_stride', 0))
     if params['eval_stride'] > 0:
         params['eval_noisyspeech_dir'] = utils.get_dir(cfg, 'eval_noisy_destination', 'eval_noisy')
@@ -1365,6 +1392,18 @@ def _load_rir_lists(params):
         params['myrir'] = myrir
         params['mychannel'] = mychannel
         params['myt60'] = myt60
+        if not myrir:
+            print(
+                "Warning: use_rir=True but no RIR rows matched (choice={}, t60=[{:.3f}, {:.3f}])".format(
+                    params['rir_choice'], params['lower_t60'], params['upper_t60']
+                )
+            )
+        else:
+            print(
+                "RIR pool loaded: {} entries (choice={}, t60=[{:.3f}, {:.3f}])".format(
+                    len(myrir), params['rir_choice'], params['lower_t60'], params['upper_t60']
+                )
+            )
     else:
         params['myrir'] = []
         params['mychannel'] = []
@@ -1451,6 +1490,14 @@ def _run_generation(params):
             "Perf gen build avg: clean_files/build={:.2f} noise_files/build={:.2f} "
             "activity_call_avg={:.3f}".format(
                 clean_files_per_build, noise_files_per_build, activity_call_avg
+            )
+        )
+    if params.get('use_rir', False):
+        print(
+            "RIR summary: pool={} applied={} resampled={}".format(
+                len(params.get('myrir', [])),
+                perf.get('rir_applied', 0),
+                perf.get('rir_resampled', 0),
             )
         )
 
