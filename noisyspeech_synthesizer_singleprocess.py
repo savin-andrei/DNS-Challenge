@@ -819,6 +819,10 @@ def main_gen(params):
                 #print(samples_rir.shape)
                 #print(my_channel)
 
+            samples_rir_ch = np.asarray(samples_rir_ch, dtype=np.float32)
+            if fs_rir != params['fs']:
+                samples_rir_ch = _resample_audio(samples_rir_ch, fs_rir, params['fs'])
+
             clean = add_pyreverb(clean, samples_rir_ch)
             perf["rir_s"] += time.perf_counter() - t0
         clean_target_len = len(clean)
